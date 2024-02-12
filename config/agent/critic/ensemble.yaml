@@ -1,0 +1,9 @@
+_target_: erl_lib.agent.module.critic.critic.EnsembleCriticNetwork
+dim_obs: ${agent.dim_obs}
+dim_act: ${agent.dim_act}
+dim_hidden: 512
+num_hidden: 2
+num_members: 5
+norm_eps: 1e-5
+bound_factor: 0.0
+bounded_prediction: False

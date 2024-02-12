@@ -1,0 +1,11 @@
+defaults:
+  - /agent/model_train/base_train@_here_
+
+init:
+  _target_: erl_lib.agent.model_based.model_train.de_trainer.DETrainer
+  lr: 0.001
+  tau: 0.0
+  grad_clip: 0.0
+  improvement_threshold: 0.05
+  keep_threshold: 0.25
+poisson_weights: False

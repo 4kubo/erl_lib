@@ -1,0 +1,4 @@
+suite: dmc
+task_id: cheetah-run
+action_repeat: 2
+kwargs:

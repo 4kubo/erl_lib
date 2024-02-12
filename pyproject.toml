@@ -1,0 +1,39 @@
+[tool.black]
+line-length = 88
+exclude = '''
+(
+  /(
+      .eggs         # exclude a few common directories in the
+    | .git          # root of the project
+    | .mypy_cache
+    | docs
+  )
+)
+'''
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erllib"
+version = "0.0.1"
+requires-python = ">=3.8"
+dependencies = [
+    "torch<2.0.0",
+    "mujoco<3.0.0",
+    "tqdm",
+    "dm-control>=1.0.0",
+    "opencv-python",
+    "gymnasium[mujoco,classic_control]>0.29",
+    "hydra-core==1.2.0",
+    "numpy",
+    "scipy",
+    "imageio[ffmpeg]",
+    "matplotlib",
+    "tensorboardX>=2.6",
+    "pandas",
+]
+
+[tool.setuptools.packages.find]
+exclude = ["config"]

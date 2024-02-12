@@ -1,0 +1,8 @@
+_target_: erl_lib.agent.module.actor.diag_gaussian.DiagGaussianActor
+dim_obs: ${agent.dim_obs}
+dim_act: ${agent.dim_act}
+num_hidden: 2
+dim_hidden: 512
+log_std_bounds:
+  - -10.0
+  - 2.0

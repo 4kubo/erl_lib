@@ -1,0 +1,6 @@
+_target_: erl_lib.base.agent.BaseAgent
+dim_obs: ???
+dim_act: ???
+iters_per_epoch: 10  # The frequency of agent's evaluation
+steps_per_iter:  # The frequency of agent's update
+seed_iters: 10

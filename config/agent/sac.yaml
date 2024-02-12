@@ -1,0 +1,39 @@
+defaults:
+  - /agent/base@_here_
+  - actor: diag_gaussian
+  - critic: ensemble
+
+_target_: erl_lib.agent.sac.SACAgent
+buffer_size: 1000000
+max_batch_size:
+buffer_device: cuda
+batch_size: 256
+warm_start: False
+num_policy_opt_per_step: 1
+normalize_input: False
+modality: state
+lr_loss_norm: 3e-4
+# SAC's params
+discount: 0.0
+lr: 3e-4
+clip_grad_norm: 0
+split_validation: False
+num_sample_weights: 0
+# Critic
+critic_tau: 0.005
+critic_subset_size: 2
+num_critic_iter: 1
+critic_lr_ratio: 1.0
+reward_q_th_lb: 0.05
+reward_q_th_ub: 0.95
+normalized_reward: False
+# Actor
+actor_reduction: min
+# Alpha
+init_alpha: 1.0
+lr_alpha: ${agent.lr}
+entropy_balance: 1.0
+# Common
+steps_per_iter: 1
+iters_per_epoch: 10000
+seed_iters: 10000

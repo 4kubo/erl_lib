@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+  - env: gym
+  - agent: base
+
+log:
+  log_dir: exp
+  log_level: INFO
+  epochs_per_checkpoint: 0
+  silent: False
+  record: True
+  wandb:
+    use: False
+    project:
+    entity:
+    group_name:
+    tags:
+    metrics:
+    mode:
+
+env_eval:
+  kwargs:
+common:
+  seed: 0
+  device: cuda
+  max_time_steps: 1e+7
+  num_training_envs: 1
+  num_eval_episodes: 10
+  load_model:
+  eval:
+    stack_obs: False
+    callback:
+hydra:
+  run:
+    dir: ${log.log_dir}
+  sweep:
+    dir: ${log.log_dir}
+    subdir: ${hydra.job.override_dirname}

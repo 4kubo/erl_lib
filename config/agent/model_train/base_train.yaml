@@ -1,0 +1,9 @@
+init:
+  lr: 0.001
+model_batch_size: 2048
+val_batch_size: 2048
+val_batch_iter_ratio: 1
+validation_ratio: 0.2
+max_batch_iter: 5
+base_epochs: 30
+poisson_weights: False
