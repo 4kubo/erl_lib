@@ -72,7 +72,7 @@ def run(cfg):
     if cfg.agent.seed_iters in (0.0, None):
         cfg.agent.seed_iters = max(5, int(1000 / max_episode_steps))
 
-    print(OmegaConf.to_yaml(cfg))
+    logger.info(OmegaConf.to_yaml(cfg))
 
     # Agent
     term_fn = envs.get_wrapper_attr("termination_model")

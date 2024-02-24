@@ -6,6 +6,6 @@ init:
   lr: 0.001
   tau: 0.0
   grad_clip: 0.0
-  improvement_threshold: 0.05
-  keep_threshold: 0.25
+  improvement_threshold: 0.1
+  keep_threshold: 0.5
 poisson_weights: False

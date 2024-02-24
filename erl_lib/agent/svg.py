@@ -16,7 +16,7 @@ from erl_lib.util.misc import (
     soft_update_params,
     Normalizer,
     TransitionIterator,
-    WithoutReplacementBuffer,
+    ReplayBuffer,
 )
 
 
@@ -28,9 +28,9 @@ class SVGAgent(SACAgent):
         dynamics_model,
         model_train,
         rollout_horizon,
+        rollout_freq,
         retain_model_buffer_iter,
         normalized_loss: float,
-        # Policy optimization
         mve_horizon,
         **kwargs,
     ):
@@ -38,10 +38,14 @@ class SVGAgent(SACAgent):
 
         self.mve_horizon = mve_horizon
         self.normalized_loss = normalized_loss
-        if 0 < self.normalized_loss and self.critic_bounded is False:
+        if 0 < self.normalized_loss and self.critic_scaled is False:
             self.normalized_loss = 0
             self.logger.warning(f"Loss scale option is disabled")
 
+        if self.input_normalizer is None:
+            self.input_normalizer = Normalizer(
+                self.dim_obs, self.device, "input_normalizer"
+            )
         self.output_normalizer = Normalizer(
             self.dim_obs + 1, self.device, "output_normalizer"
         )
@@ -63,7 +67,7 @@ class SVGAgent(SACAgent):
         # Implement logics of model training such as early stopping
         self.rollout_horizon = rollout_horizon
         self.num_rollout_samples = self.batch_size * self.rollout_horizon
-        self.rollout_freq = self.rollout_horizon
+        self.rollout_freq = rollout_freq
 
         self.model_batch_size = model_train.model_batch_size
         self.val_batch_size = model_train.val_batch_size
@@ -85,10 +89,9 @@ class SVGAgent(SACAgent):
         self.replay_buffer.poisson_weights = model_train.poisson_weights
         self.capacity = self.num_rollout_samples * retain_model_buffer_iter
         split_section_dict = {OBS: self.dim_obs, ACTION: self.dim_act, REWARD: 1}
-        self.rollout_buffer = WithoutReplacementBuffer(
+        self.rollout_buffer = ReplayBuffer(
             self.capacity,
             self.device,
-            [self.dim_obs],
             split_section_dict=split_section_dict,
         )
         self.logger.debug(f"{self.rollout_buffer} is built")
@@ -100,8 +103,8 @@ class SVGAgent(SACAgent):
         weight_rate = torch.ones(
             (mve_horizon, self.batch_size, self.num_critic_ensemble), device=self.device
         )
-        self.weight_dist = Exponential(weight_rate)
-        self.critic_loss_weight = self.weight_dist.sample()
+        # self.weight_dist = Exponential(weight_rate)
+        # self.critic_loss_weight = self.weight_dist.sample()
         discount_exps = torch.stack(
             [torch.arange(-i, -i + mve_horizon + 1) for i in range(mve_horizon)],
             dim=0,
@@ -170,6 +173,7 @@ class SVGAgent(SACAgent):
 
                 for i in range(self.rollout_horizon):
                     action, _, _ = self.sample_action(ctx_modules.actor, obs_input)
+                    # action = self.plan(obs, 3, 3, 2)
 
                     next_obs, reward, done, info = ctx_modules.model_step(
                         action,
@@ -209,28 +213,18 @@ class SVGAgent(SACAgent):
                     break
 
     def pre_update(self):
+        super().pre_update()
         # --------------- Model Training -----------------
         self.update_model()
         self.rollout_buffer.clear()
         # --------------- Agent Training -----------------
         self.init_optimizer()
 
-        # Policy evaluation just after model learning
-        if 0 < self.num_critic_iter:
-            self.rollout_to_buffer(num_rollout_samples=self.capacity)
-
-            critic_iter = trange(
-                self.num_critic_iter,
-                **self.kwargs_trange,
-                desc="[Critic]",
-            )
-            self.update_critic(iter=critic_iter)
-
     def sample_action(self, actor, obs, log=False, **kwargs):
         dist = actor(obs, log=log)
         action = dist.rsample()
         log_prob = dist.log_prob(action).sum(-1, keepdims=True)
-        return action, log_prob, dist.mean
+        return action, log_prob, dist
 
     def update_critic(self, log=False, iter=None):
         ma_info, state = {}, None
@@ -260,9 +254,9 @@ class SVGAgent(SACAgent):
                 )
                 ctx_modules.critic_optimizer.zero_grad()
                 if 0 < self.normalized_loss:
-                    loss_critic /= ctx_modules.critic.q_width[0].clamp_min(
-                        self.normalized_loss
-                    )
+                    loss_critic /= torch.square(
+                        ctx_modules.critic.q_width[0]
+                    ).clamp_min(self.normalized_loss)
 
                 loss_critic.backward()
                 if self.clip_grad_norm:
@@ -290,7 +284,7 @@ class SVGAgent(SACAgent):
                 actor_obs = self.input_normalizer.normalize(obs)
             else:
                 actor_obs = obs
-            action, log_pi, scale = self.sample_action(
+            action, log_pi, _ = self.sample_action(
                 ctx_modules.actor, actor_obs, log=log
             )
         else:
@@ -299,6 +293,7 @@ class SVGAgent(SACAgent):
         (
             states,
             actions,
+            _,
             masks,
             rewards,
             last_state,
@@ -306,18 +301,17 @@ class SVGAgent(SACAgent):
             last_log_pi,
             info,
         ) = self.rollout(
-            ctx_modules.actor,
             ctx_modules.alpha,
             obs,
             action,
             ctx_modules.model_step,
+            actor=ctx_modules.actor,
             mve_horizon=self.mve_horizon,
             detach_target=detach_target,
-            # log_index=log_index,
             log=log,
         )
-        len_rollout = len(rewards)
-        discount_mat = self.discount_mat[: len(rewards), : len(rewards) + 1]
+        # len_rollout = len(rewards)
+        # discount_mat = self.discount_mat[: len(rewards), : len(rewards) + 1]
         sas = torch.cat([states, actions], 1)
         last_sa = torch.cat([last_state, last_action], 1)
         target_value, pred_values = self.eval_rollout(
@@ -327,24 +321,38 @@ class SVGAgent(SACAgent):
             alpha=ctx_modules.alpha,
             last_sa=last_sa,
             log_pi=last_log_pi,
-            discounts=discount_mat,
+            discounts=self.discount_mat,
             critic=ctx_modules.critic,
             critic_target=ctx_modules.critic_target,
             info=info,
         )
         loss_critic = F.mse_loss(pred_values, target_value[..., None], reduction="none")
-        loss_critic = loss_critic * self.critic_loss_weight[:len_rollout, ...]
+        # loss_critic = loss_critic * self.critic_loss_weight[:len_rollout, ...]
 
         loss_critic = loss_critic.sum(2).mean()
 
         # Collect learning metrics
-        self._info.update(
-            **{
-                KEY_CRITIC_LOSS: loss_critic.detach() / self.num_critic_ensemble,
-                "q_value-mean": pred_values.detach().mean(),
-                "q_value-std": pred_values.detach().std(-1).mean(),
-            }
-        )
+        self._info[KEY_CRITIC_LOSS] = loss_critic.detach() / self.num_critic_ensemble
+        if log:
+            with torch.no_grad():
+                q_mean = pred_values.mean()
+                q_std = pred_values.std(-1).mean()
+
+                if self.dynamics_model.normalized_reward:
+                    return_mean = self.output_normalizer.mean[0, 1] / (1 - self.discount)
+                    return_std = self.output_normalizer.std[0, 1]
+                    rescaled_q_mean = return_mean + return_std * q_mean
+                    rescaled_q_std = q_std * return_std
+                    self._info.update(
+                        **{
+                            "raw_q_value-mean": q_mean,
+                            "raw_q_value-std": q_std,
+                            "q_value-mean": rescaled_q_mean,
+                            "q_value-std": rescaled_q_std,
+                        }
+                    )
+                else:
+                    self._info.update(**{"q_value-mean": q_mean, "q_value-std": q_std})
 
         return (
             log_pi,
@@ -359,41 +367,58 @@ class SVGAgent(SACAgent):
 
     def rollout(
         self,
-        actor,
         alpha,
         obs,
         action,
         model_step,
         mve_horizon: int,
+        # actions=None,
+        actor=None,
         detach_target=False,
         regularized=True,
+        scales=None,
         log=False,
         **kwargs,
     ):
         target_ctx = torch.no_grad if detach_target else nullcontext
 
-        done = self.done.clone()
+        done = (
+            self.done.clone()
+            if obs.shape[0] == self.batch_size
+            else torch.full(
+                (obs.shape[0], 1), False, device=self.device, dtype=torch.bool
+            )
+        )
 
         obs_input = obs
         if self.normalize_input:
             obs_input = self.input_normalizer.normalize(obs_input)
-        obss, actions, rewards, dones = (
+
+        obss, rewards, dones = (
             [obs_input.detach()],
-            [action.detach()],
             [],
             [done.clone()],
         )
+        if actor is None:
+            actions = action
+        else:
+            actions = [action.detach()]
         info = {}
 
         for step in range(mve_horizon):
             # Sample action
-            if 0 < step:
+            if actor is None:
+                action = actions[step]
+                log_pi = None
+            elif 0 < step:
                 with target_ctx():
-                    action, log_pi, _ = self.sample_action(actor, obs_input, **kwargs)
+                    action, log_pi, pi = self.sample_action(actor, obs_input, **kwargs)
 
                 if step < mve_horizon:
                     obss.append(obs_input.detach())
                     actions.append(action.detach())
+                    if scales is not None:
+                        scales.append(pi.scale.detach())
             else:
                 log_pi = None
 
@@ -421,21 +446,26 @@ class SVGAgent(SACAgent):
             dones.append(done.clone())
             self._info.update(**info_s)
 
-            if done.all():
-                break
-
         # Convert a stack of dict into a dict of stacked model states
         obss = torch.vstack(obss)
-        actions = torch.vstack(actions)
         masks = (~torch.hstack(dones).t()).float()
 
         # Terminal condition
         with target_ctx():
-            action, log_pi, _ = self.sample_action(actor, obs_input, **kwargs)
+            if actor is None:
+                action = actions[-1]
+            else:
+                actions = torch.vstack(actions)
+                action, log_pi, pi = self.sample_action(actor, obs_input, **kwargs)
+
+            if scales is not None:
+                scales.append(pi.scale.detach())
+                scales = torch.vstack(scales)
 
         return (
             obss,
             actions,
+            scales,
             masks,
             rewards,
             obs_input,
@@ -458,13 +488,10 @@ class SVGAgent(SACAgent):
         info: dict,
     ):
         with torch.no_grad():
-            if self.critic_bounded:
-                lb_reward, ub_reward = torch.quantile(torch.stack(rewards), self.q_th)
-                self.update_critic_bound(critic, critic_target, lb_reward, ub_reward)
-            q_values = critic_target(last_sa, hard_bound=self.critic_bounded)
+            q_values = critic_target(last_sa)
             q_values = self._reduce(q_values, "min")
             q_values = self._regularize_reward(q_values, log_pi, None, alpha)
-            target_rewards = torch.stack(rewards + [q_values[:, 0]], 0)
+            target_rewards = torch.stack(rewards + [q_values[:, 0]], 0)  # [H+1,B]
             target_values = discounts.mm(target_rewards * masks)
 
         pred_values = critic(sas)
@@ -500,16 +527,13 @@ class SVGAgent(SACAgent):
                 detach_target=False,
                 log=log,
             )
-            loss_scale = (
-                ctx_modules.critic.q_width[0].clamp_min(self.normalized_loss)
-                if self.critic_bounded and 0 < self.normalized_loss
-                else None
-            )
-
             # Update the critics
             ctx_modules.critic_optimizer.zero_grad()
-            if loss_scale:
-                loss_critic /= loss_scale
+            if self.critic_scaled:
+                loss_scale = ctx_modules.critic.q_width[0].clamp_min(1e-3)
+                loss_critic.register_hook(lambda grad: grad / loss_scale)
+            else:
+                loss_scale = None
             loss_critic.backward()
 
             if self.clip_grad_norm:
@@ -524,7 +548,7 @@ class SVGAgent(SACAgent):
                     critic_grad_norm=calc_grad_norm(ctx_modules.critic),
                     **ctx_modules.critic.info,
                 )
-                if self.critic_bounded:
+                if self.critic_scaled:
                     q_center, q_width, q_ub, q_lb = ctx_modules.critic.get_stats()
                     self._info.update(
                         q_center=q_center,
@@ -547,9 +571,18 @@ class SVGAgent(SACAgent):
                 masks,
                 log_pi,
                 info,
+                loss_scale,
                 log=log,
-                loss_scale=loss_scale,
             )
+
+            if self.critic_scaled:
+                with torch.no_grad():
+                    self._reward_pi = batch.reward
+                    lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
+                    self.update_critic_bound(
+                        lb_reward,
+                        ub_reward,
+                    )
 
         return self._info
 
@@ -575,8 +608,8 @@ class SVGAgent(SACAgent):
         masks,
         log_pi,
         info,
-        log=False,
         loss_scale=None,
+        log=False,
     ):
         # Model-based value expansion
         mc_v_target = self._actor_loss(
@@ -584,8 +617,6 @@ class SVGAgent(SACAgent):
         )
         # Stochastic Value Gradient
         loss_actor = -mc_v_target.mean()
-        if loss_scale:
-            loss_actor /= loss_scale
 
         entropy = -log_pi.detach().mean()
         self._info.update(**{KEY_ACTOR_LOSS: loss_actor.detach(), "entropy": entropy})
@@ -603,6 +634,8 @@ class SVGAgent(SACAgent):
 
         # Take a SGD step
         ctx_modules.actor_optimizer.zero_grad()
+        if loss_scale:
+            loss_actor.register_hook(lambda grad: grad / loss_scale)
         loss_actor.backward()
 
         if log:
@@ -622,7 +655,7 @@ class SVGAgent(SACAgent):
             self.actor_optimizer,
             self.critic,
             self.critic_target,
-            critic_svg,
+            self.critic,
             self.critic_optimizer,
             self.alpha,
             self.model_step_context,
@@ -692,4 +725,4 @@ class ContextModules(NamedTuple):
     critic_optimizer: torch.optim.Optimizer
     alpha: torch.Tensor
     model_step: Callable
-    rollout_buffer: WithoutReplacementBuffer
+    rollout_buffer: ReplayBuffer

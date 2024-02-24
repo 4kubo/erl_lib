@@ -30,18 +30,42 @@ class EnsembleLinearLayer(nn.Module):
         self.num_members = num_members
         self.in_size = in_size
         self.out_size = out_size
-        self.weight = nn.Parameter(
+        self.weight_decay = weight_decay
+        self._weight = nn.Parameter(
             torch.zeros(self.num_members, self.in_size, self.out_size)
         )
-        self.weight_decay = weight_decay
-        self.bias = nn.Parameter(torch.zeros(self.num_members, 1, self.out_size))
-        self.use_bias = True
+        self._bias = nn.Parameter(torch.zeros(self.num_members, 1, self.out_size))
+        self._index = None
 
         self.apply(ensemble_kaiming_normal)
 
     def forward(self, x):
-        xw = x.matmul(self.weight)
-        return xw + self.bias
+        return x.matmul(self.weight).add(self.bias)
+
+    def set_index(self, index):
+        self._index = index
+
+    @property
+    def weight(self):
+        if self.training or self._index is None:
+            return self._weight
+        else:
+            return self._weight[self._index, ...]
+
+    # @weight.setter
+    # def weight(self, idx):
+    #     self._weight = self._weight_param[idx, ...]
+
+    @property
+    def bias(self):
+        if self.training or self._index is None:
+            return self._bias
+        else:
+            return self._bias[self._index, ...]
+    #
+    # @bias.setter
+    # def bias(self, idx):
+    #     self._bias = self._bias_param[idx, ...]
 
     # def get_weight_at(self, idx):
     #     weights = [self.weight[idx, ...].cpu().numpy()]
@@ -56,8 +80,10 @@ class EnsembleLinearLayer(nn.Module):
     #     self.bias[idx, ...].copy_(bias)
 
     def extra_repr(self) -> str:
-        return (f"num_members={self.num_members}, in_size={self.in_size}, "
-                f"out_size={self.out_size}, decay={self.weight_decay}")
+        return (
+            f"num_members={self.num_members}, in_size={self.in_size}, "
+            f"out_size={self.out_size}, decay={self.weight_decay}"
+        )
 
 
 class NormalizedEnsembleLinear(nn.Module):

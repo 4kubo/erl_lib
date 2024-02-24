@@ -26,6 +26,7 @@ dependencies = [
     "dm-control>=1.0.0",
     "opencv-python",
     "gymnasium[mujoco,classic_control]>0.29",
+    "gym==0.13",
     "hydra-core==1.2.0",
     "numpy",
     "scipy",

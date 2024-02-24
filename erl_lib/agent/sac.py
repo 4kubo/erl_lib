@@ -45,6 +45,7 @@ class SACAgent(BaseAgent):
         clip_grad_norm: float,
         split_validation: bool,
         num_sample_weights: int,
+        grad_scaled: bool,
         modality: str,
         warm_start: bool,
         # Critic
@@ -88,8 +89,13 @@ class SACAgent(BaseAgent):
         self.weight_rate = torch.ones(
             (self.batch_size, self.num_critic_ensemble), device=self.device
         )
-        self.weight_dist = Exponential(self.weight_rate)
-        self.critic_loss_weight = self.weight_dist.sample()
+        # self.weight_dist = Exponential(self.weight_rate)
+        # self.critic_loss_weight = self.weight_dist.sample()
+        self.grad_scaled = grad_scaled
+        if grad_scaled:
+            self.base_bound_factor = 0.5 / (1 - self.discount)
+            self.q_th = torch.tensor(self.reward_q_th, device=self.device)
+            self._q_width_g = torch.tensor([1.0], device=self.device)
         # Actor
         self.actor = hydra.utils.instantiate(actor).to(self.device)
         self.deterministic_actor = self.actor.deterministic
@@ -137,13 +143,8 @@ class SACAgent(BaseAgent):
             self.input_normalizer = None
 
     def build_critics(self, critic_cfg):
-        self.critic_bound_factor = critic_cfg.bound_factor
-        self.critic_bounded = 0 < self.critic_bound_factor
-
-        if self.critic_bounded:
-            self.base_bound_factor = 0.5 / (1 - self.discount)
-            self.q_th = torch.tensor(self.reward_q_th, device=self.device)
-            self._reward_pi = None
+        self.critic_scale_factor = critic_cfg.bound_factor
+        self.critic_scaled = critic_cfg.bounded_prediction
 
         self.critic_target = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic = hydra.utils.instantiate(critic_cfg).to(self.device)
@@ -212,23 +213,27 @@ class SACAgent(BaseAgent):
         if self.input_normalizer is not None:
             self.input_normalizer.to()
 
-        if self.critic_bounded and self._reward_pi is None:
-            with torch.no_grad():
-                batch = self.replay_buffer.sample(self.batch_size)
-
-                if self.input_normalizer is None:
-                    obs = batch.obs
-                else:
-                    obs = self.input_normalizer.normalize(batch.obs)
-                dist = self.actor(obs)
-                action = dist.sample()
-                log_pi = dist.log_prob(action).sum(-1, keepdim=True)
-
-                self._reward_pi = batch.reward - self.alpha * log_pi
-                lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
-                self.update_critic_bound(
-                    self.critic, self.critic_target, lb_reward, ub_reward
-                )
+        # if self.critic_scaled:
+        #     # if self.critic_scaled and self._reward_pi is None:
+        #
+        #     with torch.no_grad():
+        #         batch = self.replay_buffer.sample(self.batch_size)
+        #
+        #         if self.input_normalizer is None:
+        #             obs = batch.obs
+        #         else:
+        #             obs = self.input_normalizer.normalize(batch.obs)
+        #         dist = self.actor(obs)
+        #         action = dist.sample()
+        #         log_pi = dist.log_prob(action).sum(-1, keepdim=True)
+        #
+        #         # self._reward_pi = batch.reward - self.alpha * log_pi
+        #         self._reward_pi = batch.reward
+        #         # lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
+        #         lb_reward, ub_reward = self._reward_pi.min(), self._reward_pi.max()
+        #         self.update_critic_bound(
+        #             self.critic, self.critic_target, lb_reward, ub_reward
+        #         )
 
     def update(self, opt_step, log=False):
         """The main method of the algorithm to update actor and critic models."""
@@ -236,13 +241,13 @@ class SACAgent(BaseAgent):
         soft_update_params(self.critic, self.critic_target, self.critic_tau)
 
         log_pi = self.update_actor(obs, log)
-        if self.critic_bounded:
-            with torch.no_grad():
-                self._reward_pi = batch.reward - self.alpha * log_pi
-                lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
-                self.update_critic_bound(
-                    self.critic, self.critic_target, lb_reward, ub_reward
-                )
+        # if self.critic_scaled:
+        #     with torch.no_grad():
+        #         self._reward_pi = batch.reward - self.alpha * log_pi
+        #         lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
+        #         self.update_critic_bound(
+        #             self.critic, self.critic_target, lb_reward, ub_reward
+        #         )
 
     def update_critic(self, replay_buffer, log=False):
         for i in range(self.num_critic_iter):
@@ -279,7 +284,7 @@ class SACAgent(BaseAgent):
                         "q_value-std": q_values.detach().std(-1).mean(),
                     }
                 )
-                if self.critic_bounded:
+                if self.critic_scaled:
                     self._info.update(
                         **{
                             "q_width": self.critic.q_width,
@@ -299,7 +304,7 @@ class SACAgent(BaseAgent):
             next_action = dist.sample()
             log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
             next_sa = torch.cat([next_obs, next_action], 1)
-            q_values = self.critic_target(next_sa, hard_bound=self.critic_bounded)
+            q_values = self.critic_target(next_sa, hard_bound=self.critic_scaled)
             q_value = self._reduce(q_values)
             v_value = q_value - self.alpha.detach() * log_prob
             target_value = reward + (mask * self.discount * v_value)
@@ -307,7 +312,7 @@ class SACAgent(BaseAgent):
         sa = torch.cat([obs, action], 1)
         q_values = self.critic(sa)
         qf_loss = F.mse_loss(q_values, target_value, reduction="none")
-        qf_loss = qf_loss * self.critic_loss_weight
+        # qf_loss = qf_loss * self.critic_loss_weight
         qf_loss = qf_loss.sum(-1).mean()
         return qf_loss, q_values.detach()
 
@@ -350,25 +355,9 @@ class SACAgent(BaseAgent):
 
         return log_pi
 
-    def update_critic_bound(self, critic, target_critic, min_reward, max_reward):
-        q_center = (max_reward + min_reward) * self.base_bound_factor
-        q_width = (
-            (max_reward - min_reward)
-            * self.base_bound_factor
-            * self.critic_bound_factor
-        )
-        q_center_g, q_width_g, _, _ = critic.get_stats()
-        if not torch.isnan(q_center_g):
-            q_center = (1 - self.lr_loss_norm) * q_center_g + self.lr_loss_norm * q_center
-            q_width = (1 - self.lr_loss_norm) * q_width_g + self.lr_loss_norm * q_width
-            # q_center = (1 - self.lr) * q_center_g + self.lr * q_center
-            # q_width = (1 - self.lr) * q_width_g + self.lr * q_width
-        q_ub = q_center + q_width
-        q_lb = q_center - q_width
-
-        critic.set_stats(q_center, q_width, q_ub, q_lb)
-        target_critic.set_stats(q_center, q_width, q_ub, q_lb)
-
+    def update_critic_bound(self, min_reward, max_reward):
+        q_width = (max_reward - min_reward) * self.critic_scale_factor
+        self._q_width_g = (1 - self.lr_loss_norm) * self._q_width_g + self.lr_loss_norm * q_width
         self._info.update(max_reward=max_reward, min_reward=min_reward)
 
     def _reduce(self, values, reduction="min"):
@@ -393,10 +382,6 @@ class SACAgent(BaseAgent):
                 value += torch.std(values, 1, keepdim=True)
 
         return value
-
-    def reset(self):
-        super().reset()
-        self.critic_loss_weight = self.weight_dist.sample()
 
     @property
     def alpha(self):

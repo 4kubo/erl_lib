@@ -52,7 +52,7 @@ class DETrainer:
         assert (
             improvement_threshold <= keep_threshold
         ), f"{improvement_threshold} > {keep_threshold}"
-        self.early_stop = improvement_threshold < 1.0
+        self.early_stop = keep_threshold < 1
 
     def train(
         self,
@@ -76,6 +76,8 @@ class DETrainer:
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
         best_val_score, _ = self.evaluate(dataset_eval)
 
+        if 1 <= self.keep_threshold:
+            keep_epochs = num_max_epochs
         self.early_stopper = EarlyStopping(
             self.model,
             best_val_score,

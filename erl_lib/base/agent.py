@@ -231,7 +231,7 @@ class BaseAgent:
             print_str = (
                 f"Steps: {self.time_steps_total: >10,d}, "
                 f"Episodes: {self.num_episodes: >6,d}, "
-                f"EvalReturn: {result[EVAL + '/return']:5.2f}"
+                f"EvalReturn: {result[EVAL + '/return']:7.2f}"
             )
             self.logger.info(print_str)
         else:

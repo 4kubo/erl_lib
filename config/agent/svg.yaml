@@ -10,20 +10,21 @@ buffer_size: 1000000
 max_batch_size: 100000
 buffer_device: cpu
 actor_reduction: mean
-#discount: 0.997
 init_alpha: 0.1
-critic_lr_ratio: 3.0
+critic_lr_ratio: 1.0
+grad_scaled: True
 # SVG specific
 retain_model_buffer_iter: 10
 rollout_horizon: 20
+rollout_freq: 20
 learned_reward: True
 normalized_loss: False
-num_critic_iter: 200  # Iter ration before main policy optimization
+num_critic_iter: 0
 mve_horizon: 5
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
 critic:
-  bound_factor: 3.0
+  bound_factor: 1.0
 # Common
 iters_per_epoch: 10
 steps_per_iter:

@@ -1,17 +1,18 @@
 _target_: erl_lib.agent.model_based.modules.gaussian_mlp.GaussianMLP
 device: ${common.device}
-num_members: 7
+num_members: 8
 dim_hidden: 200
+normalize_layer: True
 noise_bias_fac: 0.1
-noise_wd: 0.01
-min_ale: 0.0
-lb_std: 0.0
-uncertainty_bonus: 0.0
-dropout_rate: 0.01
-droprate_type:
+noise_wd: 0.001
+lb_std: 1e-3
 weight_decay_base: 0.001
 weight_decay_ratios:
   - 0.25
   - 0.5
   - 0.75
   - 1.0
+priors_on_function_values: False
+prediction_strategy: ts_1
+sample_reward: False
+normalize_io: True

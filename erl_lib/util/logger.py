@@ -2,7 +2,6 @@
 import copy
 import logging
 import os
-import wandb
 from collections import OrderedDict
 from logging.handlers import RotatingFileHandler
 from omegaconf import OmegaConf
@@ -13,8 +12,6 @@ import torch
 from tensorboardX import SummaryWriter
 
 from erl_lib.base.datatype import Metrics
-
-os.environ["WANDB_SILENT"] = "true"
 
 
 def flatten_dict(
@@ -120,6 +117,9 @@ class Logger:
         use_wandb = cfg.log.wandb.use and not any((project is None, entity is None))
         if use_wandb:
             try:
+                import wandb
+                os.environ["WANDB_SILENT"] = "true"
+
                 group_name = cfg.log.wandb.get("group_name", "none")
                 if group_name is None:
                     group_name = f"{cfg.env.task_id}"

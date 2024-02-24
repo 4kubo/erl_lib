@@ -6,7 +6,7 @@ from erl_lib.agent.module.layer import EnsembleLinearLayer
 
 
 class EnsembleCriticNetwork(nn.Module):
-    scale_params = ["max_reward", "min_reward", "q_ub", "q_lb", "q_center", "q_width"]
+    scale_params = ["max_reward", "min_reward", "q_ub", "q_lb"]
 
     def __init__(
         self,
@@ -28,11 +28,14 @@ class EnsembleCriticNetwork(nn.Module):
         self.num_hidden = num_hidden
         self.num_members = num_members
         self.bound_factor = bound_factor
-        self.bounded_prediction = bounded_prediction
         self.info = {}
 
-        for param_name in self.scale_params:
-            self.register_buffer(param_name, torch.as_tensor([torch.nan]))
+        if 0 < bound_factor:
+            self.bounded_prediction = bounded_prediction
+            for param_name in self.scale_params:
+                self.register_buffer(param_name, torch.as_tensor([torch.nan]))
+            self.register_buffer("q_center", torch.as_tensor([0.0], dtype=torch.float32))
+            self.register_buffer("q_width", torch.as_tensor([bound_factor], dtype=torch.float32))
 
         layers = [
             EnsembleLinearLayer(num_members, dim_obs + dim_act, dim_hidden),
@@ -54,30 +57,17 @@ class EnsembleCriticNetwork(nn.Module):
         self.hidden_layers[-1].weight.data.fill_(0)
         self.hidden_layers[-1].bias.data.fill_(0)
 
-    def forward(self, xu, hard_bound=False, log=False):
+    def forward(self, xu):
         pred = self.hidden_layers(xu)
-        pred = pred[..., 0].t()
-        if log:
-            with torch.no_grad():
-                self.info.update(
-                    critic_raw_mean=pred.mean(),
-                    critic_raw_ensemble_std=pred.std(1).mean(),
-                    critic_raw_sample_std=pred.mean(1).std(),
-                )
-
-        if self.bounded_prediction:
-            pred = self.scale(
-                pred, self.q_width, self.q_center, self.q_ub, self.q_lb, hard_bound
-            )
-        return pred
+        return pred[..., 0].t()
 
     def scale(self, pred, q_width, q_center, q_ub, q_lb, hard_bound=False):
         assert q_width is not None
-        pred = pred * q_width / self.bound_factor * 0.1 + q_center
-        if hard_bound:
-            assert q_ub is not None
-            pred = q_ub - torch.relu(q_ub - pred)
-            pred = q_lb + torch.relu(pred - q_lb)
+        pred = pred * q_width / self.bound_factor + q_center
+        # if hard_bound and q_ub is not None:
+        #     assert q_ub is not None
+        #     pred = q_ub - torch.relu(q_ub - pred)
+        #     pred = q_lb + torch.relu(pred - q_lb)
         return pred
 
     def set_stats(self, q_center, q_width, q_ub, q_lb):

@@ -8,6 +8,7 @@ from gymnasium.wrappers.monitoring.video_recorder import VideoRecorder
 from gymnasium.wrappers import (
     FlattenObservation,
     RescaleAction,
+    TimeLimit,
     RecordEpisodeStatistics,
     RecordVideo,
     VectorListInfo,
@@ -16,6 +17,7 @@ import imageio
 
 from erl_lib.base.env import BaseEnv
 from erl_lib.envs.dmc.from_dm import DmControlEnv
+from erl_lib.envs.myosuite.from_myosuite import MyoSuiteEnv
 
 
 class VectorEnv(SyncVectorEnv, BaseEnv):
@@ -218,6 +220,7 @@ def make_envs(config_env, num_envs, log_dir=None):
     suite = config_env.suite
     task_id = config_env.task_id
     action_repeat = config_env.get("action_repeat", 1)
+    max_episode_steps = config_env.get("max_episode_steps", 1000)
     env_kwargs = config_env.kwargs or {}
 
     if suite == "dmc":
@@ -227,18 +230,34 @@ def make_envs(config_env, num_envs, log_dir=None):
             env = DmControlEnv(domain_name, task_name, **kwargs)
             return env
 
-    elif suite in ["mb-gym", "gym"]:
+    elif suite in ["gym", "gym-robo"]:
 
         def make(**kwargs):
-            env = gymnasium.envs.registration.make(
-                task_id, disable_env_checker=True, **kwargs
-            )
+            try:
+                env = gymnasium.envs.registration.make(
+                    task_id, disable_env_checker=True, **kwargs
+                ).unwrapped
+            except TypeError:
+                kwargs.pop("height")
+                kwargs.pop("width")
+                env = gymnasium.envs.registration.make(
+                    task_id, disable_env_checker=True, **kwargs
+                ).unwrapped
             return env
+
+    elif suite == "myosuite":
+
+        def make(**kwargs):
+            return MyoSuiteEnv(task_id, **kwargs)
+
+    else:
+        raise NotImplementedError(f"Task {task_id} is invalid as of suite {suite}")
 
     wrappers = [
         (FlattenObservation, {}),
         (RepeatAction, {"action_repeat": action_repeat}),
         (RescaleAction, {"min_action": -1.0, "max_action": 1.0}),
+        (TimeLimit, {"max_episode_steps": max_episode_steps}),
     ]
 
     def create_env(instance_id):
@@ -273,7 +292,7 @@ def make_envs(config_env, num_envs, log_dir=None):
     env_fns = [create_env(instance_id) for instance_id in range(num_envs)]
     envs = VectorEnv(env_fns)
 
-    max_episode_steps = envs.max_episode_steps
+    # max_episode_steps = envs.max_episode_steps
     dim_obs = envs.single_observation_space.shape[0]
     dim_act = envs.single_action_space.shape[0]
 
