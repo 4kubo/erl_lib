@@ -344,12 +344,8 @@ class Normalizer:
             self.num_old += num_new
 
     def to(self):
-        self.mean = torch.as_tensor(
-            self.mean_np, device=self.device, dtype=torch.float32
-        )
-        self.std = torch.as_tensor(
-            np.sqrt(self.var_np), device=self.device, dtype=torch.float32
-        )
+        self.mean.data.copy_(torch.from_numpy(self.mean_np))
+        self.std.data.copy_(torch.from_numpy(np.sqrt(self.var_np)))
 
     def normalize(self, val) -> torch.Tensor:
         """Normalizes the value according to the stored statistics."""

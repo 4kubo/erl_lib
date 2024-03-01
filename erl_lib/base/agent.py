@@ -279,7 +279,10 @@ class BaseAgent:
 
     @property
     def iters_this_epoch(self):
-        return max(self.iters_per_epoch, self.seed_iters)
+        if self.total_iters < self.seed_iters:
+            return max(self.iters_per_epoch, self.seed_iters)
+        else:
+            return self.iters_per_epoch
 
     @property
     def total_iters(self):

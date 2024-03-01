@@ -24,7 +24,6 @@ critic_subset_size: 2
 num_critic_iter: 1
 critic_lr_ratio: 1.0
 reward_q_th_lb: 0.05
-reward_q_th_ub: 0.95
 normalize_input: False
 normalized_reward: False
 # Actor

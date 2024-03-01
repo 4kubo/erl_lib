@@ -45,7 +45,6 @@ class SACAgent(BaseAgent):
         clip_grad_norm: float,
         split_validation: bool,
         num_sample_weights: int,
-        grad_scaled: bool,
         modality: str,
         warm_start: bool,
         # Critic
@@ -55,7 +54,6 @@ class SACAgent(BaseAgent):
         num_critic_iter,
         critic_lr_ratio: float,
         reward_q_th_lb: float,
-        reward_q_th_ub: float,
         normalized_reward: bool,
         # Actor
         actor,
@@ -76,8 +74,8 @@ class SACAgent(BaseAgent):
         self.lr_loss_norm = lr_loss_norm
         self.warm_start = warm_start
         # Critic
-        assert reward_q_th_lb < reward_q_th_ub, (reward_q_th_lb, reward_q_th_ub)
-        self.reward_q_th = (reward_q_th_lb, reward_q_th_ub)
+        assert 0 <= reward_q_th_lb <= 1
+        self.reward_q_th = (reward_q_th_lb, 1- reward_q_th_lb)
         self.build_critics(critic)
         self.critic_tau = critic_tau
         self.num_critic_iter = num_critic_iter
@@ -91,11 +89,12 @@ class SACAgent(BaseAgent):
         )
         # self.weight_dist = Exponential(self.weight_rate)
         # self.critic_loss_weight = self.weight_dist.sample()
-        self.grad_scaled = grad_scaled
-        if grad_scaled:
-            self.base_bound_factor = 0.5 / (1 - self.discount)
+        if self.critic_scaled:
+            # self.base_bound_factor = 0.5 / (1 - self.discount)
             self.q_th = torch.tensor(self.reward_q_th, device=self.device)
-            self._q_width_g = torch.tensor([1.0], device=self.device)
+            # self._q_width_g = torch.tensor([1.0], device=self.device)
+            self._q_lb = None
+            self._q_ub = None
         # Actor
         self.actor = hydra.utils.instantiate(actor).to(self.device)
         self.deterministic_actor = self.actor.deterministic
@@ -284,14 +283,14 @@ class SACAgent(BaseAgent):
                         "q_value-std": q_values.detach().std(-1).mean(),
                     }
                 )
-                if self.critic_scaled:
-                    self._info.update(
-                        **{
-                            "q_width": self.critic.q_width,
-                            "q_lb": self.critic.q_lb,
-                            "q_ub": self.critic.q_ub,
-                        }
-                    )
+                # if self.critic_scaled:
+                #     self._info.update(
+                #         **{
+                #             "q_width": self.critic.q_width,
+                #             "q_lb": self.critic.q_lb,
+                #             "q_ub": self.critic.q_ub,
+                #         }
+                #     )
 
         # Step a SGD step
         self.critic_optimizer.step()
@@ -304,7 +303,7 @@ class SACAgent(BaseAgent):
             next_action = dist.sample()
             log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
             next_sa = torch.cat([next_obs, next_action], 1)
-            q_values = self.critic_target(next_sa, hard_bound=self.critic_scaled)
+            q_values = self.critic_target(next_sa)
             q_value = self._reduce(q_values)
             v_value = q_value - self.alpha.detach() * log_prob
             target_value = reward + (mask * self.discount * v_value)
@@ -355,10 +354,27 @@ class SACAgent(BaseAgent):
 
         return log_pi
 
-    def update_critic_bound(self, min_reward, max_reward):
-        q_width = (max_reward - min_reward) * self.critic_scale_factor
-        self._q_width_g = (1 - self.lr_loss_norm) * self._q_width_g + self.lr_loss_norm * q_width
-        self._info.update(max_reward=max_reward, min_reward=min_reward)
+    def update_critic_bound(self, reward_lb, reward_ub):
+        # q_width = (max_reward - min_reward) * self.critic_scale_factor
+        scale = 1.0 / (1 - self.discount)
+        q_ub = reward_ub * scale
+        q_lb = reward_lb * scale
+        w = (q_ub - q_lb) * .5
+        c = (q_ub + q_lb) * .5
+        q_lb = c - w * self.critic_scale_factor
+        q_ub = c + w * self.critic_scale_factor
+        # self._q_width_g = (
+        #     1 - self.lr_loss_norm
+        # ) * self._q_width_g + self.lr_loss_norm * q_width
+        if self._q_ub is None:
+            self._q_lb = q_lb
+            self._q_ub = q_ub
+        else:
+            self._q_lb.lerp_(q_lb, self.lr_loss_norm)
+            self._q_ub.lerp_(q_ub, self.lr_loss_norm)
+
+        self._info.update(**{"reward_ub": reward_ub, "reward_lb": reward_lb,
+                             "q_ub": self._q_ub, "q_lb": self._q_lb})
 
     def _reduce(self, values, reduction="min"):
         if reduction in ("min", "max"):

@@ -253,10 +253,10 @@ class SVGAgent(SACAgent):
                     log=log,
                 )
                 ctx_modules.critic_optimizer.zero_grad()
-                if 0 < self.normalized_loss:
-                    loss_critic /= torch.square(
-                        ctx_modules.critic.q_width[0]
-                    ).clamp_min(self.normalized_loss)
+                # if 0 < self.normalized_loss:
+                #     loss_critic /= torch.square(
+                #         ctx_modules.critic.q_width[0]
+                #     ).clamp_min(self.normalized_loss)
 
                 loss_critic.backward()
                 if self.clip_grad_norm:
@@ -491,8 +491,18 @@ class SVGAgent(SACAgent):
             q_values = critic_target(last_sa)
             q_values = self._reduce(q_values, "min")
             q_values = self._regularize_reward(q_values, log_pi, None, alpha)
+            if self.critic_scaled:
+                reward_lb, reward_ub = torch.quantile(torch.stack(rewards), self.q_th)
+                self.update_critic_bound(reward_lb, reward_ub)
+                q_values = self._q_ub - torch.relu(self._q_ub - q_values)
+                q_values = self._q_lb + torch.relu(q_values - self._q_lb)
             target_rewards = torch.stack(rewards + [q_values[:, 0]], 0)  # [H+1,B]
             target_values = discounts.mm(target_rewards * masks)
+            # if self.critic_scaled:
+            #     reward_lb, reward_ub = torch.quantile(torch.stack(rewards), self.q_th)
+            #     self.update_critic_bound(reward_lb, reward_ub)
+            #     target_values = self._q_ub - torch.relu(self._q_ub - target_values)
+            #     target_values = self._q_lb + torch.relu(target_values - self._q_lb)
 
         pred_values = critic(sas)
         pred_values = pred_values.view(
@@ -529,11 +539,6 @@ class SVGAgent(SACAgent):
             )
             # Update the critics
             ctx_modules.critic_optimizer.zero_grad()
-            if self.critic_scaled:
-                loss_scale = ctx_modules.critic.q_width[0].clamp_min(1e-3)
-                loss_critic.register_hook(lambda grad: grad / loss_scale)
-            else:
-                loss_scale = None
             loss_critic.backward()
 
             if self.clip_grad_norm:
@@ -548,14 +553,6 @@ class SVGAgent(SACAgent):
                     critic_grad_norm=calc_grad_norm(ctx_modules.critic),
                     **ctx_modules.critic.info,
                 )
-                if self.critic_scaled:
-                    q_center, q_width, q_ub, q_lb = ctx_modules.critic.get_stats()
-                    self._info.update(
-                        q_center=q_center,
-                        q_width=q_width,
-                        q_lb=q_lb,
-                        q_ub=q_ub,
-                    )
 
             ctx_modules.critic_optimizer.step()
             soft_update_params(
@@ -571,18 +568,9 @@ class SVGAgent(SACAgent):
                 masks,
                 log_pi,
                 info,
-                loss_scale,
+                None,
                 log=log,
             )
-
-            if self.critic_scaled:
-                with torch.no_grad():
-                    self._reward_pi = batch.reward
-                    lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
-                    self.update_critic_bound(
-                        lb_reward,
-                        ub_reward,
-                    )
 
         return self._info
 

@@ -12,7 +12,6 @@ buffer_device: cpu
 actor_reduction: mean
 init_alpha: 0.1
 critic_lr_ratio: 1.0
-grad_scaled: True
 # SVG specific
 retain_model_buffer_iter: 10
 rollout_horizon: 20
