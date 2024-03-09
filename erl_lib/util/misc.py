@@ -315,7 +315,7 @@ class Normalizer:
         self.var_np = np.ones((1, size), dtype=np.float32)
         self.mean = torch.as_tensor(self.mean_np, device=device)
         self.std = torch.as_tensor(self.var_np, device=device)
-        self.eps = 1e-8
+        self.eps = 1e-4
         self.device = device
         self.name = name
 
@@ -327,7 +327,7 @@ class Normalizer:
         num_new = data.shape[0]
         if self.num_old == 0:
             self.mean_np = data.mean(0, keepdims=True)
-            self.var_np = data.var(0, keepdims=True).clip(self.eps, np.inf)
+            self.var_np = data.var(0, keepdims=True)
             self.num_old = num_new
         else:
             num_total = self.num_old + num_new
@@ -338,14 +338,13 @@ class Normalizer:
             ) + np.square(data).sum(0, keepdims=True)
 
             self.mean_np = sum_total / num_total
-            self.var_np = (sqr_total / num_total - np.square(self.mean_np)).clip(
-                self.eps, np.inf
-            )
+            self.var_np = sqr_total / num_total - np.square(self.mean_np)
             self.num_old += num_new
 
     def to(self):
+        std_np = np.sqrt(self.var_np).clip(min=self.eps)
         self.mean.data.copy_(torch.from_numpy(self.mean_np))
-        self.std.data.copy_(torch.from_numpy(np.sqrt(self.var_np)))
+        self.std.data.copy_(torch.from_numpy(std_np))
 
     def normalize(self, val) -> torch.Tensor:
         """Normalizes the value according to the stored statistics."""

@@ -5,7 +5,7 @@ defaults:
 
 _target_: erl_lib.agent.svg.SVGAgent
 term_fn: ???
-normalize_input: True
+normalize_io: True
 buffer_size: 1000000
 max_batch_size: 100000
 buffer_device: cpu
@@ -16,10 +16,10 @@ critic_lr_ratio: 1.0
 retain_model_buffer_iter: 10
 rollout_horizon: 20
 rollout_freq: 20
+training_rollout_horizon: 5
+mve_horizon: 5
 learned_reward: True
 normalized_loss: False
-num_critic_iter: 0
-mve_horizon: 5
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
 critic:

@@ -27,6 +27,7 @@ class GaussianMLP(Model):
 
     def __init__(
         self,
+        term_fn,
         input_normalizer,
         output_normalizer,
         *args,
@@ -48,14 +49,17 @@ class GaussianMLP(Model):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.term_fn = term_fn
         self.input_normalizer = input_normalizer
         self.output_normalizer = output_normalizer
+        self.normalize_io = input_normalizer is not None
         self.num_members = num_members
         self.noise_wd = noise_wd
-        self.lb_std = lb_std
-        self.lb_log_scale = np.log(lb_std) if 0 < lb_std else None
+        self.lb_std = lb_std or 0
+        self.lb_log_scale = (
+            np.log(lb_std) if (lb_std is not None and 0 < lb_std) else None
+        )
         self.weight_decay_base = weight_decay_base
-        self.normalize_io = normalize_io
         self.uncertainty_bonus = uncertainty_bonus
         self.normalized_reward = normalized_reward
         self.priors_on_function_values = priors_on_function_values
@@ -125,23 +129,14 @@ class GaussianMLP(Model):
         """
         mus = self.layers(x)
 
-        sample_mean, sample_std = (
-            self.output_normalizer.mean,
-            self.output_normalizer.std,
-        )
         if self.normalize_io:
+            sample_mean, sample_std = (
+                self.output_normalizer.mean,
+                self.output_normalizer.std,
+            )
+            mus = sample_mean + sample_std * mus
             log_std_ale = self._log_noise + sample_std.log()
-            if normalized_reward:
-                assert self.learned_reward is True
-                mus[:, :, 1:] += (
-                    sample_mean[:, 1:] + (sample_std[:, 1:] - 1) * mus[:, :, 1:]
-                )
-                # Do nothing about std since std is not used for sampling of reward
-            else:
-                mus = sample_mean + sample_std * mus
         else:
-            if normalized_reward:
-                mus[:, :, 0] = (mus[:, :, 1] - sample_mean[:, :1]) / sample_std[:, :1]
             log_std_ale = self._log_noise
         return mus, log_std_ale, {}
 
@@ -167,13 +162,13 @@ class GaussianMLP(Model):
 
         log_std_ale = log_std_ale.mean(0)
 
-        if 0 < uncertainty_bonus:
-            normalized_std_epi = (
-                log_std_epi.exp() / self.output_normalizer.std.clamp_min(1e-8)
-            )
-            # normalized_std_epi = torch.exp(log_std_epi - log_std_ale)
-            epi_bonus = normalized_std_epi.mean(-1, keepdims=True) * uncertainty_bonus
-            info[self.INTRINSIC_REWARD] = epi_bonus
+        # if 0 < uncertainty_bonus:
+        #     normalized_std_epi = (
+        #         log_std_epi.exp() / self.output_normalizer.std.clamp_min(1e-8)
+        #     )
+        #     # normalized_std_epi = torch.exp(log_std_epi - log_std_ale)
+        #     epi_bonus = normalized_std_epi.mean(-1, keepdims=True) * uncertainty_bonus
+        #     info[self.INTRINSIC_REWARD] = epi_bonus
 
         return mu, log_std_epi, log_std_ale, info
 
@@ -205,39 +200,25 @@ class GaussianMLP(Model):
                     if isinstance(layer, EnsembleLinearLayer):
                         layer.set_index(ensemble_idx)
 
-                log_noise = self._log_noise[ensemble_idx, ...]
+                log_std_ale = self._log_noise[ensemble_idx, ...]
             else:
-                log_noise = self._log_noise
+                log_std_ale = self._log_noise
 
             batch_size = x.shape[0]
             num_samples_per_member = batch_size // self.num_members
             x = x.view(self.num_members, num_samples_per_member, self.dim_input)
             mu = self.layers(x).view(batch_size, self.dim_output)
 
-            sample_mean, sample_std = (
-                self.output_normalizer.mean,
-                self.output_normalizer.std,
-            )
-            if self.normalize_io:
-                if normalized_reward:
-                    assert self.learned_reward is True
-                    mu[:, 1:] += (
-                        sample_mean[:, 1:] + (sample_std[:, 1:] - 1) * mu[:, 1:]
-                    )
-                    # Do nothing about std since std is not used for sampling of reward
-                else:
-                    mu = sample_mean + sample_std * mu
-                log_noise = log_noise + sample_std.log()
-            elif normalized_reward:
-                mu[:, 0] = (mu[:, 1] - sample_mean[:, :1]) / sample_std[:, :1]
+            # if self.normalize_io:
+            #     mu, log_std_ale = self.rescale(mu, log_noise)
 
-            scale = (
-                log_noise.repeat(1, num_samples_per_member, 1)
+            log_std_ale = (
+                log_std_ale.repeat(1, num_samples_per_member, 1)
                 .contiguous()
-                .exp()
                 .view(-1, self.dim_output)
             )
 
+            scale = log_std_ale.exp()
             info = {}
 
         elif 1 < self.num_members:
@@ -274,6 +255,16 @@ class GaussianMLP(Model):
                     for dim, logstd_ale_d in enumerate(log_std_ale_):
                         info[f"{dim}_logstd_ale"] = logstd_ale_d
         return mu, scale, info
+
+    # def rescale(self, mu, log_std_ale):
+    #     mu_out, std_out = (
+    #         self.output_normalizer.mean,
+    #         self.output_normalizer.std,
+    #     )
+    #     mu = mu_out + std_out * mu
+    #     log_std_ale = log_std_ale + std_out.log()
+    #
+    #     return mu, log_std_ale
 
     def _mse_loss(
         self,
@@ -342,13 +333,25 @@ class GaussianMLP(Model):
         self.train()
         optimizer.zero_grad()
 
+        # Predict
+        mus, log_std_ale, info = self.base_forward(model_in, normalized_reward=False)
+        # if self.normalize_io:
+        #     state_mu, state_std = self.input_normalizer.mean, self.input_normalizer.std
+        #     reward_mu, reward_std = (
+        #         self.output_normalizer.mean,
+        #         self.output_normalizer.std,
+        #     )
+        #     target[:, 1:] = (target[:, 1:] - state_mu) / state_std
+        #     target[:, :1] = (target[:, :1] - reward_mu) / reward_std
+        # log_std_ale = log_std_ale + sample_std.log()
+        # Preprocess on target values
         if 1 < self.num_members:
-            model_in = model_in.unsqueeze(0)
-            target = target.unsqueeze(0)
-            target = target.repeat(self.num_members, 1, 1)
-            loss, info = self._nll_loss(model_in, target, weight.t())
+            target = target[None, ...].repeat(self.num_members, 1, 1)
+            weight = weight.t()
         else:
-            loss, info = self._nll_loss(model_in, target)
+            weight = None
+        # Calculate loss
+        loss = self.nll_loss(mus, log_std_ale, target, weight)
 
         loss.backward()
         if grad_clip:
@@ -357,6 +360,38 @@ class GaussianMLP(Model):
         optimizer.step()
         return loss, info
 
+    def nll_loss(
+        self,
+        pred_mus: torch.Tensor,
+        pred_log_noise: torch.Tensor,
+        target: torch.Tensor,
+        weight: torch.Tensor = 1.0,
+        log=False,
+    ) -> torch.Tensor:
+        """Negative log-likelihood on mini-batch.
+
+        B: Batch size
+        D: Dimension of input data
+        E: Ensemble size
+        model_in: [(E,) B, D]
+        target: [(E,) B, D]
+        weight: [E, B] if ensemble
+        """
+
+        l2 = F.mse_loss(pred_mus, target, reduction="none")
+        # if self.lb_std:
+        #     pred_log_noise = pred_log_noise.clamp_min(self.lb_log_scale)
+        inv_var = (-2 * pred_log_noise).exp() * 0.5
+        if self.lb_std:
+            pred_logstd = pred_log_noise.clamp_min(self.lb_log_scale)
+        else:
+            pred_logstd = pred_log_noise
+        nll = torch.sum(l2 * inv_var + pred_logstd, -1)
+        nll = torch.mean(nll * weight, dim=-1)  # average over batch
+
+        loss = nll.sum()  # sum over ensemble dimension
+        return loss
+
     def eval_score(self, batch, log=False):
         """Computes the squared error for the model over the given input/target."""
         model_in, target, weight = self.process_batch(batch)
@@ -364,6 +399,13 @@ class GaussianMLP(Model):
         if self.prediction_strategy in (PS_TS1, PS_INF):
             # return self._mse_loss(model_in, target)
             mus, log_std_ale, info = self.base_forward(model_in)
+            # if self.normalize_io:
+            #     sample_mean, sample_std = (
+            #         self.output_normalizer.mean,
+            #         self.output_normalizer.std,
+            #     )
+            #     mus = sample_mean + sample_std * mus
+            #     log_std_ale = log_std_ale + sample_std.log()
             mu = mus.mean(0)
             var_ale = (2 * log_std_ale).mean(0).exp()
             var_epi = mus.var(0)
@@ -395,7 +437,8 @@ class GaussianMLP(Model):
             # error = (target - mu) ** 2  # [B, D]
             scale_log = scale.log()
 
-        score = 0.5 * error / (variance + self.lb_std**2) + scale_log
+        # score = 0.5 * error / (variance + self.lb_std**2) + scale_log
+        score = 0.5 * error / variance + scale_log
 
         eval_score = score.sum(-1)  # [B, D] -> [B]
         return eval_score, error, variance, info
@@ -413,7 +456,8 @@ class GaussianMLP(Model):
         return decay_loss
 
     def process_batch(
-        self, batch: TransitionBatch, *args
+        self,
+        batch: TransitionBatch,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         obs = batch.obs
         action = batch.action
@@ -430,7 +474,11 @@ class GaussianMLP(Model):
             target = torch.cat([batch.reward, target_obs], dim=obs.ndim - 1)
         else:
             target = target_obs
-        return model_in, target, batch.weight
+        # if 0 < target_noise_scale:
+        #     target += torch.randn_like(target) * target_noise_scale
+        # if self.normalize_io:
+        #     target = self.output_normalizer.normalize(target)
+        return model_in, target.clone(), batch.weight
 
     def sample(
         self,
@@ -445,50 +493,44 @@ class GaussianMLP(Model):
         Optional[Dict[str, float]],
     ]:
         """Samples next observations and rewards from the underlying 1-D model."""
+        model_in = torch.cat([obs, act], dim=obs.ndim - 1)
+        mu, scale, info = self.forward(model_in, log=log, **kwargs)
+
+        epsilon = torch.randn_like(obs)
         if self.normalize_io:
-            obs_input = self.input_normalizer.normalize(obs)
-        else:
-            obs_input = obs
-        model_in = torch.cat([obs_input, act], dim=obs.ndim - 1)
-
-        mu, scale, info = self.forward(
-            model_in,
-            log=log,
-            normalized_reward=self.normalized_reward,
-            uncertainty_bonus=self.uncertainty_bonus,
-            **kwargs,
-        )
-
-        if self.sample_reward:
-            epsilon = torch.randn_like(mu)
-
-            diff = mu + epsilon * scale
-
+            input_mu, input_std = self.input_normalizer.mean, self.input_normalizer.std
+            mu[:, 1:] += scale[:, 1:] * epsilon
+            diff = self.output_normalizer.denormalize(mu)
             if self.learned_reward:
                 reward, obs_diff = torch.tensor_split(diff, [1], dim=1)
-                next_obs = obs + obs_diff
+                obs_diff /= input_std
             else:
-                next_obs = obs + diff
-                reward = None
+                reward = False
+                obs_diff = diff
+            next_obs = obs + obs_diff
+
+            if self.term_fn:
+                # std = self.input_normalizer.std
+                obs_t = self.input_normalizer.denormalize(obs)
+                next_obs_t = self.input_normalizer.denormalize(next_obs)
+                terminated = self.term_fn(obs_t, act, next_obs_t)
+            else:
+                terminated = False
         else:
             if self.learned_reward:
                 reward, obs_mu = torch.tensor_split(mu, [1], dim=1)
-                obs_scale = scale[:, 1:, ...]
+                obs_scale = scale[:, 1:]
             else:
                 obs_mu = mu
                 obs_scale = scale
                 reward = None
-
-            epsilon = torch.randn_like(obs)
             next_obs = obs + obs_mu + epsilon * obs_scale
+            if self.term_fn:
+                terminated = self.term_fn(obs, act, next_obs)
+            else:
+                terminated = False
 
-        if self.INTRINSIC_REWARD in info:
-            intrinsic_reward = info.pop(self.INTRINSIC_REWARD)
-            reward += intrinsic_reward
-            if log:
-                info[self.INTRINSIC_REWARD] = intrinsic_reward.detach().mean()
-
-        return next_obs, reward, None, info
+        return next_obs, reward, terminated, info
 
     def optimized_parameters(self, recurse: bool = True):
         params = []

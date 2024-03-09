@@ -3,7 +3,7 @@ device: ${common.device}
 num_members: 8
 dim_hidden: 256
 normalize_layer: True
-noise_bias_fac: 0.1
+noise_bias_fac: 0.0
 noise_wd: 0.001
 lb_std: 1e-3
 weight_decay_base: 0.001

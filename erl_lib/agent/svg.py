@@ -10,7 +10,7 @@ from tqdm import trange
 
 from erl_lib.agent.model_based.model_env import ModelEnv
 from erl_lib.agent.sac import SACAgent
-from erl_lib.base import OBS, ACTION, REWARD, KEY_ACTOR_LOSS, KEY_CRITIC_LOSS
+from erl_lib.base import OBS, ACTION, REWARD, NEXT_OBS, MASK, KEY_ACTOR_LOSS, KEY_CRITIC_LOSS
 from erl_lib.util.misc import (
     calc_grad_norm,
     soft_update_params,
@@ -28,12 +28,17 @@ class SVGAgent(SACAgent):
         dynamics_model,
         model_train,
         rollout_horizon,
+        training_rollout_horizon,
         rollout_freq,
         retain_model_buffer_iter,
         normalized_loss: float,
         mve_horizon,
         **kwargs,
     ):
+        if rollout_horizon <= 0:
+            kwargs["buffer_device"] = "cuda"
+            rollout_freq = 0
+
         super().__init__(**kwargs)
 
         self.mve_horizon = mve_horizon
@@ -42,13 +47,12 @@ class SVGAgent(SACAgent):
             self.normalized_loss = 0
             self.logger.warning(f"Loss scale option is disabled")
 
-        if self.input_normalizer is None:
-            self.input_normalizer = Normalizer(
-                self.dim_obs, self.device, "input_normalizer"
+        if self.normalize_io:
+            self.output_normalizer = Normalizer(
+                self.dim_obs + 1, self.device, "output_normalizer"
             )
-        self.output_normalizer = Normalizer(
-            self.dim_obs + 1, self.device, "output_normalizer"
-        )
+        else:
+            self.output_normalizer = None
 
         # Building model
         dynamics_model.dim_input = self.dim_obs + self.dim_act
@@ -58,16 +62,19 @@ class SVGAgent(SACAgent):
         # Now instantiate the model
         self.dynamics_model = instantiate(
             dynamics_model,
+            term_fn,
             input_normalizer=self.input_normalizer,
             output_normalizer=self.output_normalizer,
         )
         self.logger.debug(f"{self.dynamics_model._get_name()} is built")
-        # Currently, it is assumed that the termination function is known
+        # The termination function is assumed to be known
         self.model_env = ModelEnv(self.dynamics_model, term_fn)
-        # Implement logics of model training such as early stopping
         self.rollout_horizon = rollout_horizon
         self.num_rollout_samples = self.batch_size * self.rollout_horizon
         self.rollout_freq = rollout_freq
+        # Policy optimization
+        assert mve_horizon <= training_rollout_horizon
+        self.training_rollout_horizon = training_rollout_horizon
 
         self.model_batch_size = model_train.model_batch_size
         self.val_batch_size = model_train.val_batch_size
@@ -89,6 +96,9 @@ class SVGAgent(SACAgent):
         self.replay_buffer.poisson_weights = model_train.poisson_weights
         self.capacity = self.num_rollout_samples * retain_model_buffer_iter
         split_section_dict = {OBS: self.dim_obs, ACTION: self.dim_act, REWARD: 1}
+        # if 0 < self.rollout_horizon and self.training_rollout_horizon <= 0:
+        #     split_section_dict[NEXT_OBS] = self.dim_obs
+        #     split_section_dict[MASK] = 1
         self.rollout_buffer = ReplayBuffer(
             self.capacity,
             self.device,
@@ -96,32 +106,29 @@ class SVGAgent(SACAgent):
         )
         self.logger.debug(f"{self.rollout_buffer} is built")
 
-        # Policy optimization
+        # Constants used in policy optimization
         size = (self.batch_size, 1)
         self.done = torch.full(size, False, device=self.device, dtype=torch.bool)
-
-        weight_rate = torch.ones(
-            (mve_horizon, self.batch_size, self.num_critic_ensemble), device=self.device
-        )
-        # self.weight_dist = Exponential(weight_rate)
-        # self.critic_loss_weight = self.weight_dist.sample()
-        discount_exps = torch.stack(
-            [torch.arange(-i, -i + mve_horizon + 1) for i in range(mve_horizon)],
-            dim=0,
-        ).to(self.device)
-        self.discount_mat = torch.triu(self.discount**discount_exps)
+        if 0 < self.mve_horizon:
+            discount_exps = torch.stack(
+                [torch.arange(-i, -i + self.training_rollout_horizon + 1) for i in range(mve_horizon)],
+                dim=0,
+            ).to(self.device)
+            self.discount_mat = torch.triu(self.discount**discount_exps)
 
     def observe(self, obs, action, reward, next_obs, terminated, truncated, info):
         # Update running statistics of observed samples
         target_obs = next_obs - obs
         output = np.concatenate([reward[:, None], target_obs], 1, dtype=np.float32)
-        self.output_normalizer.update_stats(output)
+        if self.normalize_io:
+            self.output_normalizer.update_stats(output)
         super().observe(obs, action, reward, next_obs, terminated, truncated, info)
 
     def update_model(self):
         """Returns training/validation iterators for the data in the replay buffer."""
-        self.input_normalizer.to()
-        self.output_normalizer.to()
+        if self.normalize_io:
+            self.input_normalizer.to()
+            self.output_normalizer.to()
 
         train_data, val_data = self.replay_buffer.split_data()
         iterator_train = TransitionIterator(
@@ -154,25 +161,27 @@ class SVGAgent(SACAgent):
             num_max_epochs=max_epochs,
         )
 
-    def rollout_to_buffer(self, num_rollout_samples=None, **rollout_kwargs):
+    def model_rollout(self, num_rollout_samples=None, **rollout_kwargs):
         num_rollout_samples = num_rollout_samples or self.num_rollout_samples
         num_sampled = 0
         while True:
             batch = self.replay_buffer.sample(self.batch_size)
             obs = batch.obs
+            if self.normalize_io:
+                obs = self.input_normalizer.normalize(obs)
 
             with torch.no_grad(), self.policy_evaluation_context(
                 **rollout_kwargs
             ) as ctx_modules:
-                if self.normalize_input:
-                    obs_input = self.input_normalizer.normalize(obs)
-                else:
-                    obs_input = obs
+                # if self.normalize_io:
+                #     obs_input = self.input_normalizer.normalize(obs)
+                # else:
+                #     obs_input = obs
 
                 accum_dones = self.done.clone()
 
                 for i in range(self.rollout_horizon):
-                    action, _, _ = self.sample_action(ctx_modules.actor, obs_input)
+                    action, _, _ = self.sample_action(ctx_modules.actor, obs)
                     # action = self.plan(obs, 3, 3, 2)
 
                     next_obs, reward, done, info = ctx_modules.model_step(
@@ -181,35 +190,34 @@ class SVGAgent(SACAgent):
                         sample=True,
                     )
 
-                    accum_dones |= done
+                    accum_dones = accum_dones | done
                     continuing = ~accum_dones.squeeze(-1)
                     nnz = continuing.count_nonzero()
                     num_sampled += nnz
-                    # Filter out done samples if ne
+                    # Filter out done samples if needed
                     if nnz != self.batch_size:
                         batch_obs = obs[continuing]
                         batch_action = action[continuing]
                         batch_reward = reward[continuing]
+                        batch = [batch_obs, batch_action, batch_reward]
+                        # if self.training_rollout_horizon <= 0:
+                        #     batch += [next_obs[continuing], ~accum_dones]
                     else:
                         batch_obs = obs
                         batch_action = action
                         batch_reward = reward
+                        batch = [batch_obs, batch_action, batch_reward]
+                        # if self.training_rollout_horizon <= 0:
+                        #     batch += [next_obs, ~done]
 
-                    ctx_modules.rollout_buffer.add_batch(
-                        [batch_obs, batch_action, batch_reward]
-                    )
+                    ctx_modules.buffer.add_batch(batch)
 
                     if not continuing.any() or num_rollout_samples <= num_sampled:
                         break
 
                     obs = next_obs
-                    if self.normalize_input:
-                        obs_input = self.input_normalizer.normalize(obs)
-                    else:
-                        obs_input = obs
 
                 if num_rollout_samples <= num_sampled:
-                    ctx_modules.rollout_buffer.shuffle()
                     break
 
     def pre_update(self):
@@ -226,51 +234,6 @@ class SVGAgent(SACAgent):
         log_prob = dist.log_prob(action).sum(-1, keepdims=True)
         return action, log_prob, dist
 
-    def update_critic(self, log=False, iter=None):
-        ma_info, state = {}, None
-        iter = iter or range(self.num_critic_iter)
-        for num_iter in iter:
-            # batch = replay_buffer.sample(self.batch_size)
-            with self.policy_evaluation_context() as ctx_modules:
-                ctx_modules.critic.train()
-                ctx_modules.critic_target.eval()
-
-                batch = ctx_modules.rollout_buffer.sample(self.batch_size)
-                (
-                    log_pi,
-                    rewards,
-                    masks,
-                    last_sa,
-                    last_log_pi,
-                    pred_values,
-                    loss_critic,
-                    info,
-                ) = self.mb_policy_evaluation(
-                    ctx_modules,
-                    batch.obs,
-                    action=batch.action,
-                    detach_target=True,
-                    log=log,
-                )
-                ctx_modules.critic_optimizer.zero_grad()
-                # if 0 < self.normalized_loss:
-                #     loss_critic /= torch.square(
-                #         ctx_modules.critic.q_width[0]
-                #     ).clamp_min(self.normalized_loss)
-
-                loss_critic.backward()
-                if self.clip_grad_norm:
-                    torch.nn.utils.clip_grad_norm_(
-                        ctx_modules.critic.parameters(), self.clip_grad_norm
-                    )
-
-                ctx_modules.critic_optimizer.step()
-                soft_update_params(
-                    ctx_modules.critic, ctx_modules.critic_target, self.critic_tau
-                )
-
-        return state, ma_info
-
     def mb_policy_evaluation(
         self,
         ctx_modules,
@@ -280,12 +243,12 @@ class SVGAgent(SACAgent):
         log=False,
     ):
         if action is None:
-            if self.normalize_input:
-                actor_obs = self.input_normalizer.normalize(obs)
-            else:
-                actor_obs = obs
+            # if self.normalize_io:
+            #     actor_obs = self.input_normalizer.normalize(obs)
+            # else:
+            #     actor_obs = obs
             action, log_pi, _ = self.sample_action(
-                ctx_modules.actor, actor_obs, log=log
+                ctx_modules.actor, obs, log=log
             )
         else:
             log_pi = None
@@ -338,21 +301,21 @@ class SVGAgent(SACAgent):
                 q_mean = pred_values.mean()
                 q_std = pred_values.std(-1).mean()
 
-                if self.dynamics_model.normalized_reward:
-                    return_mean = self.output_normalizer.mean[0, 1] / (1 - self.discount)
-                    return_std = self.output_normalizer.std[0, 1]
-                    rescaled_q_mean = return_mean + return_std * q_mean
-                    rescaled_q_std = q_std * return_std
-                    self._info.update(
-                        **{
-                            "raw_q_value-mean": q_mean,
-                            "raw_q_value-std": q_std,
-                            "q_value-mean": rescaled_q_mean,
-                            "q_value-std": rescaled_q_std,
-                        }
-                    )
-                else:
-                    self._info.update(**{"q_value-mean": q_mean, "q_value-std": q_std})
+                # if self.dynamics_model.normalized_reward:
+                #     return_mean = self.output_normalizer.mean[0, 1] / (1 - self.discount)
+                #     return_std = self.output_normalizer.std[0, 1]
+                #     rescaled_q_mean = return_mean + return_std * q_mean
+                #     rescaled_q_std = q_std * return_std
+                #     self._info.update(
+                #         **{
+                #             "raw_q_value-mean": q_mean,
+                #             "raw_q_value-std": q_std,
+                #             "q_value-mean": rescaled_q_mean,
+                #             "q_value-std": rescaled_q_std,
+                #         }
+                #     )
+                # else:
+                self._info.update(**{"q_value-mean": q_mean, "q_value-std": q_std})
 
         return (
             log_pi,
@@ -391,8 +354,8 @@ class SVGAgent(SACAgent):
         )
 
         obs_input = obs
-        if self.normalize_input:
-            obs_input = self.input_normalizer.normalize(obs_input)
+        # if self.normalize_io:
+        #     obs_input = self.input_normalizer.normalize(obs_input)
 
         obss, rewards, dones = (
             [obs_input.detach()],
@@ -405,7 +368,7 @@ class SVGAgent(SACAgent):
             actions = [action.detach()]
         info = {}
 
-        for step in range(mve_horizon):
+        for step in range(self.training_rollout_horizon):
             # Sample action
             if actor is None:
                 action = actions[step]
@@ -434,11 +397,12 @@ class SVGAgent(SACAgent):
                     log=log,
                     regularized=regularized,
                 )
-                obs_input = (
-                    self.input_normalizer.normalize(obs)
-                    if self.normalize_input
-                    else obs
-                )
+                # obs_input = (
+                #     self.input_normalizer.normalize(obs)
+                #     if self.normalize_io
+                #     else obs
+                # )
+                obs_input = obs
 
             # Increment process
             rewards.append(rewards_i[:, 0])
@@ -508,18 +472,27 @@ class SVGAgent(SACAgent):
         pred_values = pred_values.view(
             -1, self.batch_size, self.num_critic_ensemble
         ).contiguous()
-        pred_values.mul_(masks[:-1, :, None])
+        deviation = discounts.shape[1] - discounts.shape[0]
+        pred_values.mul_(masks[:-deviation, :, None])
         return target_values, pred_values
 
-    def update(self, opt_step, log=False):
+    def update(self, opt_step, log=False, **kwargs):
         if (0 < self.rollout_freq) and (opt_step % self.rollout_freq == 0):
-            self.rollout_to_buffer()
+            self.model_rollout()
+        if 0 < self.training_rollout_horizon:
+            self._update(opt_step, log)
+        else:
+            super().update(opt_step, log=log, buffer=self.rollout_buffer)
 
+    def _update(self,  opt_step, log=False):
         with self.policy_evaluation_context() as ctx_modules:
-            batch = ctx_modules.rollout_buffer.sample(self.batch_size)
+            batch = ctx_modules.buffer.sample(self.batch_size)
             obs = batch.obs
             ctx_modules.critic.train()
             ctx_modules.critic_target.eval()
+
+            if self.rollout_horizon <= 0 and self.normalize_io:
+                obs = self.input_normalizer.normalize(obs)
 
             # MC approximation of state value by model rollout
             (
@@ -635,8 +608,10 @@ class SVGAgent(SACAgent):
 
     @contextmanager
     def policy_evaluation_context(self, **kwargs):
-        def critic_svg(obs):
-            return self.critic(obs, log=True)
+        if 0 < self.rollout_horizon:
+            buffer = self.rollout_buffer
+        else:
+            buffer = self.replay_buffer
 
         context_modules = ContextModules(
             self.actor,
@@ -647,7 +622,7 @@ class SVGAgent(SACAgent):
             self.critic_optimizer,
             self.alpha,
             self.model_step_context,
-            self.rollout_buffer,
+            buffer,
         )
         try:
             yield context_modules
@@ -713,4 +688,4 @@ class ContextModules(NamedTuple):
     critic_optimizer: torch.optim.Optimizer
     alpha: torch.Tensor
     model_step: Callable
-    rollout_buffer: ReplayBuffer
+    buffer: ReplayBuffer

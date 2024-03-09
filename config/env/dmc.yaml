@@ -1,4 +1,5 @@
 suite: dmc
 task_id: cheetah-run
 action_repeat: 2
+max_episode_steps: 500
 kwargs:

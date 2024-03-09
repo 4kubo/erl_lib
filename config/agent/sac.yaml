@@ -23,8 +23,8 @@ critic_tau: 0.005
 critic_subset_size: 2
 num_critic_iter: 1
 critic_lr_ratio: 1.0
-reward_q_th_lb: 0.05
-normalize_input: False
+reward_q_th_lb: 0.01
+normalize_io: False
 normalized_reward: False
 # Actor
 actor_reduction: min

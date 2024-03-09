@@ -33,7 +33,7 @@ class SACAgent(BaseAgent):
         self,
         buffer_size: int,
         buffer_device,
-        normalize_input: bool,
+        normalize_io: bool,
         device,
         discount: float,
         # Optimization
@@ -87,12 +87,8 @@ class SACAgent(BaseAgent):
         self.weight_rate = torch.ones(
             (self.batch_size, self.num_critic_ensemble), device=self.device
         )
-        # self.weight_dist = Exponential(self.weight_rate)
-        # self.critic_loss_weight = self.weight_dist.sample()
         if self.critic_scaled:
-            # self.base_bound_factor = 0.5 / (1 - self.discount)
             self.q_th = torch.tensor(self.reward_q_th, device=self.device)
-            # self._q_width_g = torch.tensor([1.0], device=self.device)
             self._q_lb = None
             self._q_ub = None
         # Actor
@@ -133,8 +129,8 @@ class SACAgent(BaseAgent):
             num_sample_weights=num_sample_weights,
         )
 
-        self.normalize_input = normalize_input
-        if self.normalize_input:
+        self.normalize_io = normalize_io
+        if self.normalize_io:
             self.input_normalizer = Normalizer(
                 self.dim_obs, self.device, "input_normalizer"
             )
@@ -167,7 +163,7 @@ class SACAgent(BaseAgent):
         with torch.no_grad():
             if isinstance(obs, np.ndarray):
                 obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-            if self.normalize_input:
+            if self.normalize_io:
                 obs = self.input_normalizer.normalize(obs)
             dist = self.actor(obs)
             if sample:
@@ -234,9 +230,10 @@ class SACAgent(BaseAgent):
         #             self.critic, self.critic_target, lb_reward, ub_reward
         #         )
 
-    def update(self, opt_step, log=False):
+    def update(self, opt_step, log=False, buffer=None):
         """The main method of the algorithm to update actor and critic models."""
-        obs, batch = self.update_critic(self.replay_buffer, log)
+        buffer = buffer or self.replay_buffer
+        obs, batch = self.update_critic(buffer, log)
         soft_update_params(self.critic, self.critic_target, self.critic_tau)
 
         log_pi = self.update_actor(obs, log)
@@ -413,7 +410,7 @@ class SACAgent(BaseAgent):
         }
         torch.save(modules, f"{dir_checkpoint}/sac.pt")
         self.replay_buffer.save(dir_checkpoint)
-        if self.normalize_input:
+        if self.normalize_io:
             self.input_normalizer.save(dir_checkpoint)
 
     def load(self, dir_checkpoint):
