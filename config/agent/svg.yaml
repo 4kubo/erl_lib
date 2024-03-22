@@ -8,18 +8,20 @@ term_fn: ???
 normalize_io: True
 buffer_size: 1000000
 max_batch_size: 100000
+warm_start: True
 buffer_device: cpu
 actor_reduction: mean
 init_alpha: 0.1
 critic_lr_ratio: 1.0
+num_critic_iter:
 # SVG specific
+update_after_episode: True
 retain_model_buffer_iter: 10
 rollout_horizon: 20
 rollout_freq: 20
 training_rollout_horizon: 5
 mve_horizon: 5
 learned_reward: True
-normalized_loss: False
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
 critic:

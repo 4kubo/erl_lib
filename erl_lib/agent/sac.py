@@ -58,6 +58,7 @@ class SACAgent(BaseAgent):
         # Actor
         actor,
         actor_reduction: str,
+        actor_tau: float,
         # Alpha
         init_alpha: float,
         lr_alpha: float,
@@ -93,7 +94,6 @@ class SACAgent(BaseAgent):
             self._q_ub = None
         # Actor
         self.actor = hydra.utils.instantiate(actor).to(self.device)
-        self.deterministic_actor = self.actor.deterministic
         self.actor_reduction = actor_reduction
         # Alpha
         self.lr_alpha = lr_alpha
@@ -137,6 +137,8 @@ class SACAgent(BaseAgent):
         else:
             self.input_normalizer = None
 
+        self.num_updated = 0
+
     def build_critics(self, critic_cfg):
         self.critic_scale_factor = critic_cfg.bound_factor
         self.critic_scaled = critic_cfg.bounded_prediction
@@ -178,7 +180,8 @@ class SACAgent(BaseAgent):
         # Policy optimization if necessary
         if (self.seed_iters <= self.total_iters) and self.step == 0:
             # Pre-update
-            self.pre_update()
+            if self.input_normalizer is not None:
+                self.input_normalizer.to()
 
             t1 = time.time()
             iterator = trange(
@@ -204,46 +207,11 @@ class SACAgent(BaseAgent):
                 "policy_optimization", {"iteration": self.total_iters}, self._info
             )
 
-    def pre_update(self):
-        if self.input_normalizer is not None:
-            self.input_normalizer.to()
-
-        # if self.critic_scaled:
-        #     # if self.critic_scaled and self._reward_pi is None:
-        #
-        #     with torch.no_grad():
-        #         batch = self.replay_buffer.sample(self.batch_size)
-        #
-        #         if self.input_normalizer is None:
-        #             obs = batch.obs
-        #         else:
-        #             obs = self.input_normalizer.normalize(batch.obs)
-        #         dist = self.actor(obs)
-        #         action = dist.sample()
-        #         log_pi = dist.log_prob(action).sum(-1, keepdim=True)
-        #
-        #         # self._reward_pi = batch.reward - self.alpha * log_pi
-        #         self._reward_pi = batch.reward
-        #         # lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
-        #         lb_reward, ub_reward = self._reward_pi.min(), self._reward_pi.max()
-        #         self.update_critic_bound(
-        #             self.critic, self.critic_target, lb_reward, ub_reward
-        #         )
-
     def update(self, opt_step, log=False, buffer=None):
         """The main method of the algorithm to update actor and critic models."""
         buffer = buffer or self.replay_buffer
         obs, batch = self.update_critic(buffer, log)
         soft_update_params(self.critic, self.critic_target, self.critic_tau)
-
-        log_pi = self.update_actor(obs, log)
-        # if self.critic_scaled:
-        #     with torch.no_grad():
-        #         self._reward_pi = batch.reward - self.alpha * log_pi
-        #         lb_reward, ub_reward = torch.quantile(self._reward_pi, self.q_th)
-        #         self.update_critic_bound(
-        #             self.critic, self.critic_target, lb_reward, ub_reward
-        #         )
 
     def update_critic(self, replay_buffer, log=False):
         for i in range(self.num_critic_iter):
@@ -280,14 +248,6 @@ class SACAgent(BaseAgent):
                         "q_value-std": q_values.detach().std(-1).mean(),
                     }
                 )
-                # if self.critic_scaled:
-                #     self._info.update(
-                #         **{
-                #             "q_width": self.critic.q_width,
-                #             "q_lb": self.critic.q_lb,
-                #             "q_ub": self.critic.q_ub,
-                #         }
-                #     )
 
         # Step a SGD step
         self.critic_optimizer.step()
@@ -360,9 +320,6 @@ class SACAgent(BaseAgent):
         c = (q_ub + q_lb) * .5
         q_lb = c - w * self.critic_scale_factor
         q_ub = c + w * self.critic_scale_factor
-        # self._q_width_g = (
-        #     1 - self.lr_loss_norm
-        # ) * self._q_width_g + self.lr_loss_norm * q_width
         if self._q_ub is None:
             self._q_lb = q_lb
             self._q_ub = q_ub
@@ -431,7 +388,7 @@ class SACAgent(BaseAgent):
         last_steps = self.total_iters if self.warm_start and (self.total_iters == self.seed_iters) else 1
         return int(
             self.num_policy_opt_per_step
-            * self.steps_per_iter
+            # * self.steps_per_iter
             * last_steps
             * self.num_envs
         )

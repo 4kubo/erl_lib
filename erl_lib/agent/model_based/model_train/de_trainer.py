@@ -22,6 +22,7 @@ class DETrainer:
         lr: float = 1e-4,
         tau: float = 0.0,
         grad_clip: float = 0.0,
+        z_test_improvement: bool = False,
         improvement_threshold: float = 0.01,
         keep_threshold: float = 0.5,
         logger=None,
@@ -34,6 +35,7 @@ class DETrainer:
         self.dim_output = model.dim_output
         self._train_iteration = 0
         self.grad_clip = grad_clip
+        self.z_test_improvement = z_test_improvement
         self.improvement_threshold = improvement_threshold
         self.keep_threshold = keep_threshold
         self.logger = logger
@@ -64,14 +66,7 @@ class DETrainer:
     ):
         """Trains the model for some number of epochs."""
         # Back to old model a little bit
-        if 0 < self.tau < 1:
-            with torch.no_grad():
-                latest_states = {
-                    key: value.clone() for key, value in self.model.state_dict().items()
-                }
-                for key, value in self.model.state_dict().items():
-                    value.data.lerp_(self.old_states[key].clone(), self.tau)
-                    self.old_states[key] = latest_states[key]
+        self.model.reset_model(self.tau)
 
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
         best_val_score, _ = self.evaluate(dataset_eval)
@@ -82,6 +77,7 @@ class DETrainer:
             self.model,
             best_val_score,
             keep_epochs,
+            z_test_improvement=self.z_test_improvement,
             improve_p_threshold=self.improvement_threshold,
             continue_p_threshold=self.keep_threshold,
         )
@@ -253,6 +249,7 @@ class EarlyStopping:
         model,
         scores_val,
         num_continue,
+        z_test_improvement,
         improve_p_threshold=0.01,
         continue_p_threshold=1.0,
     ):
@@ -269,6 +266,7 @@ class EarlyStopping:
                 f"Expected: improve_p_threshold < continue_p_threshold, "
                 f"But: {improve_p_threshold} > {continue_p_threshold}"
             )
+        self.z_test_improvement = z_test_improvement
         self.improve_p_threshold = improve_p_threshold
         self.continue_p_threshold = continue_p_threshold
 
@@ -278,6 +276,18 @@ class EarlyStopping:
 
     def step(self, scores_val):
         self.epoch += 1
+        if self.z_test_improvement:
+            self._step_z_test(scores_val)
+        else:
+            self._step_mean(scores_val)
+
+        if self.num_continue < self.iter_continued:
+            stop = True
+        else:
+            stop = False
+        return stop, self.best_score, self.epoch_best
+
+    def _step_z_test(self, scores_val):
         pvalue = p_value(scores_val, self.best_scores)
         may_continue = pvalue < self.continue_p_threshold
 
@@ -296,11 +306,23 @@ class EarlyStopping:
         else:
             self.iter_continued += 1
 
-        if self.num_continue < self.iter_continued:
-            stop = True
+    def _step_mean(self, scores_val):
+        score = scores_val.mean()
+        may_continue = score < self.best_score
+
+        if may_continue:
+            self.iter_continued = 0
+
+            normalized_score = (self.best_score - score) / (self.best_score + 1e-8)
+            improved = self.improve_p_threshold < normalized_score
+            if improved:
+                for key, value in self.model.state_dict().items():
+                    if value.ndim == 3 and value.shape[0] == self.n_models:
+                        self.best_state_dict[key] = value.clone()
+                self.best_score = score
+                self.epoch_best = self.epoch
         else:
-            stop = False
-        return stop, self.best_score, self.epoch_best
+            self.iter_continued += 1
 
     def post_process(self):
         return self.best_state_dict, self.epoch_best

@@ -28,6 +28,7 @@ normalize_io: False
 normalized_reward: False
 # Actor
 actor_reduction: min
+actor_tau: 1.0
 # Alpha
 init_alpha: 1.0
 lr_alpha: ${agent.lr}

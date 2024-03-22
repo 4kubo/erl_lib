@@ -3,9 +3,10 @@ defaults:
 
 init:
   _target_: erl_lib.agent.model_based.model_train.de_trainer.DETrainer
-  lr: 0.001
-  tau: 0.0
+  lr: 1e-3
+  tau: 1.0
   grad_clip: 0.0
   improvement_threshold: 0.1
   keep_threshold: 0.5
+  z_test_improvement: True
 poisson_weights: False

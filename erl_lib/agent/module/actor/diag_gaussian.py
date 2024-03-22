@@ -71,7 +71,7 @@ class DiagGaussianActor(nn.Module):
         layers.append(nn.Linear(dim_hidden, dim_act * 2))
         self.hidden_layers = nn.Sequential(*layers)
 
-        self.apply(weight_init)
+        self.reset()
 
         self.info = {}
 
@@ -96,3 +96,6 @@ class DiagGaussianActor(nn.Module):
                     actor_raw_scale=std.mean(),
                 )
         return dist
+
+    def reset(self):
+        self.apply(weight_init)

@@ -64,17 +64,4 @@ class EnsembleCriticNetwork(nn.Module):
     def scale(self, pred, q_width, q_center, q_ub, q_lb, hard_bound=False):
         assert q_width is not None
         pred = pred * q_width / self.bound_factor + q_center
-        # if hard_bound and q_ub is not None:
-        #     assert q_ub is not None
-        #     pred = q_ub - torch.relu(q_ub - pred)
-        #     pred = q_lb + torch.relu(pred - q_lb)
         return pred
-
-    def set_stats(self, q_center, q_width, q_ub, q_lb):
-        self.q_center.copy_(q_center)
-        self.q_width.copy_(q_width)
-        self.q_ub.copy_(q_ub)
-        self.q_lb.copy_(q_lb)
-
-    def get_stats(self):
-        return self.q_center, self.q_width, self.q_ub, self.q_lb

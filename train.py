@@ -3,12 +3,12 @@ import os
 from collections.abc import Iterable
 from tqdm import trange
 from importlib import import_module
-
+from omegaconf import OmegaConf
 import hydra
 import numpy as np
 
-# import torch.autograd
-from omegaconf import OmegaConf
+import warnings
+warnings.filterwarnings("ignore")
 
 from erl_lib.util.env import make_envs
 from erl_lib.util.misc import set_seed_everywhere

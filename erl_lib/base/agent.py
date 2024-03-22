@@ -305,13 +305,6 @@ class BaseAgent:
     def num_episodes(self):
         return self.num_episodes_this_iter + self._num_last_episodes
 
-    # def __str__(self):
-    #     return (
-    #         f"@{self.total_iters}\n"
-    #         f"Total samples observed: {self.num_samples}\n"
-    #         f"Total episodes observed: {self.num_episodes}"
-    #     )
-
     @property
     def description(self) -> str:
         return ""
