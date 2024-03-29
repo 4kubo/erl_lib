@@ -33,7 +33,7 @@ class SACAgent(BaseAgent):
         self,
         buffer_size: int,
         buffer_device,
-        normalize_io: bool,
+        normalize_input: bool,
         device,
         discount: float,
         # Optimization
@@ -129,8 +129,8 @@ class SACAgent(BaseAgent):
             num_sample_weights=num_sample_weights,
         )
 
-        self.normalize_io = normalize_io
-        if self.normalize_io:
+        self.normalize_input = normalize_input
+        if self.normalize_input:
             self.input_normalizer = Normalizer(
                 self.dim_obs, self.device, "input_normalizer"
             )
@@ -165,7 +165,7 @@ class SACAgent(BaseAgent):
         with torch.no_grad():
             if isinstance(obs, np.ndarray):
                 obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-            if self.normalize_io:
+            if self.normalize_input:
                 obs = self.input_normalizer.normalize(obs)
             dist = self.actor(obs)
             if sample:

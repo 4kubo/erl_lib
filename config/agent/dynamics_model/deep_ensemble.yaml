@@ -3,7 +3,6 @@ device: ${common.device}
 num_members: 8
 dim_hidden: 256
 normalize_layer: True
-noise_bias_fac: 0.0
 #noise_lr:
 drop_rate_base: 1e-2
 noise_wd: 1e-3

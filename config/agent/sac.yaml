@@ -24,7 +24,7 @@ critic_subset_size: 2
 num_critic_iter: 1
 critic_lr_ratio: 1.0
 reward_q_th_lb: 0.01
-normalize_io: False
+normalize_input: False
 normalized_reward: False
 # Actor
 actor_reduction: min
@@ -34,6 +34,6 @@ init_alpha: 1.0
 lr_alpha: ${agent.lr}
 entropy_balance: 1.0
 # Common
-steps_per_iter: 1
+steps_per_iter:                                                                                                                                                                                                              1
 iters_per_epoch: 10000
 seed_iters: 10000

@@ -31,10 +31,11 @@ class GaussianMLP(Model):
         term_fn,
         input_normalizer,
         output_normalizer,
+        normalize_input: bool = True,
+        normalize_io: bool = True,
         *args,
         num_members: int = 1,
         dim_hidden: int = 200,
-        noise_bias_fac: float = 0.1,
         noise_wd: float = 0.0,
         # noise_lr: float = 1e-2,
         normalize_layer: bool = True,
@@ -55,7 +56,8 @@ class GaussianMLP(Model):
         self.term_fn = term_fn
         self.input_normalizer = input_normalizer
         self.output_normalizer = output_normalizer
-        self.normalize_io = input_normalizer is not None
+        self.normalize_input = normalize_input
+        self.normalize_io = normalize_io
         self.num_members = num_members
         self.noise_wd = noise_wd
         # self.noise_lr = noise_lr
@@ -75,7 +77,7 @@ class GaussianMLP(Model):
         # Build neural network model
         weight_decays = np.asarray(weight_decay_ratios) * weight_decay_base
         num_layers = len(weight_decay_ratios)
-        #drop_rs = np.asarray(weight_decay_ratios[::-1]) * drop_rate_base
+        # drop_rs = np.asarray(weight_decay_ratios[::-1]) * drop_rate_base
         drop_rs = np.asarray(weight_decay_ratios) * drop_rate_base
         layers = []
         dims = [self.dim_input] + [dim_hidden] * (num_layers - 1) + [self.dim_output]
@@ -139,16 +141,16 @@ class GaussianMLP(Model):
     def moment_dist(self, x, normalize_io=None):
         """Mu and sigma in Gaussian distribution's parameter."""
         mus = self.layers(x)
-        log_std_ale = self._log_noise.mean(0)
+        log_var_ale = self._log_noise.mean(0) * 2
 
-        var_epi = mus.var(0)
         mu = mus.mean(0)
+        var_epi = mus.var(0)
         log_var_epi = var_epi.log()
 
         # c.f. eq. (10) and (11) from "Augmenting Neural Networks with Priors on
         # Function Values"
         if self.priors_on_function_values:
-            mu /= (1 + var_epi)
+            mu /= 1 + var_epi
             log_var_epi -= torch.log1p(var_epi)
 
         if normalize_io is None:
@@ -159,22 +161,23 @@ class GaussianMLP(Model):
                 self.output_normalizer.std,
             )
             mu = sample_mean + sample_std * mu
-            sample_log_std = sample_std.log()
+            sample_log_var = sample_std.log() * 2
 
-            log_var_epi += sample_log_std * 2
-            log_std_ale += sample_log_std
+            log_var_epi += sample_log_var
+            log_var_ale += sample_log_var
 
         var_epi = log_var_epi.exp()
-        variance = (log_std_ale * 2).exp() + var_epi
+        variance = log_var_ale.exp() + var_epi
         log_std_epi = log_var_epi * 0.5
+        log_std_ale = log_var_ale * 0.5
 
         return mu, variance, var_epi, log_std_epi, log_std_ale
 
-    def forward(self, x: torch.Tensor, log: bool = False, **kwargs):
+    def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
         """"""
         assert x.ndim == 2
         assert not self.layers.training
-        if self.prediction_strategy in (PS_TS1, PS_INF):
+        if (prediction_strategy or self.prediction_strategy) in (PS_TS1, PS_INF):
             if self.prediction_strategy == PS_TS1:
                 ensemble_idx = torch.randperm(self.num_members, device=self.device)
                 for layer in self.layers:
@@ -193,43 +196,15 @@ class GaussianMLP(Model):
             log_std_ale = (
                 log_std_ale.repeat(1, num_samples_per_member, 1)
                 .contiguous()
-                .view(-1, self.dim_output)
+                .view(batch_size, self.dim_output)
             )
 
             scale = log_std_ale.exp()
         else:
-            # mus = self.layers(x)
-            #
-            # mu = mus.mean(0)
-            # log_std_epi = mus.std(0).log()
-            # log_std_ale = self._log_noise.mean(0)
-
-            # var_epi = (2 * log_std_epi).exp()
-            # var_ale = (2 * log_std_ale).exp()
-            # scale = torch.sqrt(var_epi + var_ale)
-
-            mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(x, normalize_io=False)
+            mu, variance = self.moment_dist(x, normalize_io=False)[:2]
             scale = variance.sqrt()
 
-        info = {}
-        # # Logging
-        # if log == "detail":
-        #     with torch.no_grad():
-        #         if 1 < self.num_members:
-        #             log_std_epi_ = log_std_epi.mean(0)
-        #             log_std_ale_ = log_std_ale.mean(0)
-        #
-        #             for dim, (logstd_epi_d, logstd_ale_d) in enumerate(
-        #                 zip(log_std_epi_, log_std_ale_)
-        #             ):
-        #                 info[f"{dim}_logstd_epi"] = logstd_epi_d
-        #                 info[f"{dim}_logstd_ale"] = logstd_ale_d
-        #         else:
-        #             log_std_ale_ = log_std_ale.squeeze(0)
-        #
-        #             for dim, logstd_ale_d in enumerate(log_std_ale_):
-        #                 info[f"{dim}_logstd_ale"] = logstd_ale_d
-        return mu, scale, info
+        return mu, scale
 
     def update(
         self,
@@ -303,23 +278,18 @@ class GaussianMLP(Model):
             mus = self.layers(model_in)
             log_std_ale = self._log_noise.mean(0)
             var_epi = mus.var(0)
-            if normalize_io:
-                target = self.output_normalizer.normalize(target)
-                # log_std_ale = log_std_ale + self.output_normalizer.std.log()
+            # if normalize_io:
+            #     target = self.output_normalizer.normalize(target)
+            #     # log_std_ale = log_std_ale + self.output_normalizer.std.log()
             error = F.mse_loss(mus, target[None, ...], reduction="none")
             error = error.mean(0)
             eval_score = error.mean(-1)
 
             variance = var_epi + (2 * log_std_ale).exp()
         else:
-            # if self.priors_on_function_values:
-            mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(model_in, normalize_io)
-            # else:
-            #     mus, log_std_ale = self.base_forward(model_in, normalize_io=normalize_io)
-            #     mu = mus.mean(0)
-            #     var_ale = (2 * log_std_ale).mean(0).exp()
-            #     var_epi = mus.var(0)
-            #     variance = var_ale + var_epi
+            mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(
+                model_in, normalize_io
+            )
             scale_log = variance.log() * 0.5
 
             error = torch.square(target - mu)  # [B, D]
@@ -359,7 +329,7 @@ class GaussianMLP(Model):
         obs = batch.obs
         action = batch.action
         # Input
-        if self.normalize_io:
+        if self.normalize_input:
             obs_input = self.input_normalizer.normalize(obs)
         else:
             obs_input = obs
@@ -367,6 +337,10 @@ class GaussianMLP(Model):
 
         # Target
         target_obs = batch.next_obs - obs
+        if self.output_normalizer is None and self.normalized_target:
+            input_scale = self.input_normalizer.std
+            target_obs /= input_scale
+
         if self.learned_reward:
             target = torch.cat([batch.reward, target_obs], dim=obs.ndim - 1)
         else:
@@ -389,18 +363,19 @@ class GaussianMLP(Model):
     ]:
         """Samples next observations and rewards from the underlying 1-D model."""
         model_in = torch.cat([obs, act], dim=obs.ndim - 1)
-        mu, scale, info = self.forward(model_in, log=log, **kwargs)
+        mu, scale = self.forward(model_in, log=log, **kwargs)
 
         epsilon = torch.randn_like(obs)
-        if self.normalize_io:
-            input_mu, input_std = self.input_normalizer.mean, self.input_normalizer.std
-            output_mu, output_std = (
-                self.output_normalizer.mean,
-                self.output_normalizer.std,
-            )
+        if self.output_normalizer:
             mu[:, 1:] += scale[:, 1:] * epsilon
 
             if self.learned_reward:
+                assert self.input_normalizer is not None
+                input_std = self.input_normalizer.std
+                output_mu, output_std = (
+                    self.output_normalizer.mean,
+                    self.output_normalizer.std,
+                )
                 if self.normalized_reward:
                     mu[:, 1:] = output_mu[:, 1:] + mu[:, 1:] * output_std[:, 1:]
                 else:
@@ -433,7 +408,7 @@ class GaussianMLP(Model):
             else:
                 terminated = False
 
-        return next_obs, reward, terminated, info
+        return next_obs, reward, terminated, {}
 
     def optimized_parameters(self, recurse: bool = True):
         params = []
