@@ -98,9 +98,9 @@ class GaussianMLP(Model):
                 layers += [linear]
 
             if 0 < dr_i < 1:
-                layers += [nn.Dropout(dr_i)]
+                layers += [nn.Dropout(dr_i, inplace=True)]
             if i != num_layers - 1:
-                layers += [nn.SiLU()]
+                layers += [nn.SiLU(inplace=True)]
 
         self.layers = nn.Sequential(*layers)
 
@@ -278,9 +278,6 @@ class GaussianMLP(Model):
             mus = self.layers(model_in)
             log_std_ale = self._log_noise.mean(0)
             var_epi = mus.var(0)
-            # if normalize_io:
-            #     target = self.output_normalizer.normalize(target)
-            #     # log_std_ale = log_std_ale + self.output_normalizer.std.log()
             error = F.mse_loss(mus, target[None, ...], reduction="none")
             error = error.mean(0)
             eval_score = error.mean(-1)

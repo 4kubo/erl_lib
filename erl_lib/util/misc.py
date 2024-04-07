@@ -342,7 +342,7 @@ class Normalizer:
             self.num_old += num_new
 
     def to(self):
-        std_np = np.sqrt(self.var_np).clip(min=self.eps)
+        std_np = np.sqrt(self.var_np.clip(min=self.eps**2))
         self.mean.data.copy_(torch.from_numpy(self.mean_np))
         self.std.data.copy_(torch.from_numpy(std_np))
 

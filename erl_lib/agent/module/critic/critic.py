@@ -18,7 +18,6 @@ class EnsembleCriticNetwork(nn.Module):
         dim_output: int = 1,
         norm_eps=0,
         bound_factor: float = 1.0,
-        bounded_prediction: bool = False,
         **kwargs,
     ):
         super(EnsembleCriticNetwork, self).__init__()
@@ -29,13 +28,6 @@ class EnsembleCriticNetwork(nn.Module):
         self.num_members = num_members
         self.bound_factor = bound_factor
         self.info = {}
-
-        if 0 < bound_factor:
-            self.bounded_prediction = bounded_prediction
-            for param_name in self.scale_params:
-                self.register_buffer(param_name, torch.as_tensor([torch.nan]))
-            self.register_buffer("q_center", torch.as_tensor([0.0], dtype=torch.float32))
-            self.register_buffer("q_width", torch.as_tensor([bound_factor], dtype=torch.float32))
 
         layers = [
             EnsembleLinearLayer(num_members, dim_obs + dim_act, dim_hidden),
@@ -59,9 +51,4 @@ class EnsembleCriticNetwork(nn.Module):
 
     def forward(self, xu):
         pred = self.hidden_layers(xu)
-        return pred[..., 0].t()
-
-    def scale(self, pred, q_width, q_center, q_ub, q_lb, hard_bound=False):
-        assert q_width is not None
-        pred = pred * q_width / self.bound_factor + q_center
-        return pred
+        return pred[..., 0]

@@ -10,7 +10,6 @@ from torch.distributions import Exponential
 from tqdm import trange
 
 from erl_lib.base.agent import BaseAgent
-from erl_lib.agent.model_based.model_env import ModelEnv
 from erl_lib.agent.sac import SACAgent
 from erl_lib.base import (
     OBS,
@@ -81,7 +80,6 @@ class SVGAgent(SACAgent):
         )
         self.logger.debug(f"{self.dynamics_model._get_name()} is built")
         # The termination function is assumed to be known
-        self.model_env = ModelEnv(self.dynamics_model, term_fn)
         self.rollout_horizon = rollout_horizon
         self.num_rollout_samples = self.batch_size * self.rollout_horizon
         self.rollout_freq = rollout_freq
@@ -170,8 +168,6 @@ class SVGAgent(SACAgent):
         #         dtype=torch.float32,
         #     )
         # )[:, None]
-
-
 
     def observe(self, obs, action, reward, next_obs, terminated, truncated, info):
         BaseAgent.observe(
@@ -328,7 +324,6 @@ class SVGAgent(SACAgent):
             mve_horizon=self.mve_horizon,
             log_pi=log_pi,
             log=log,
-            prediction_strategy="ts_infinity",
         )
         batch_mask = torch.vstack(masks).float()
         batch_sa = torch.hstack([torch.vstack(obss[:-1]), torch.vstack(actions[:-1])])
@@ -347,7 +342,7 @@ class SVGAgent(SACAgent):
             critic=ctx_modules.critic,
             critic_target=ctx_modules.critic_target,
         )
-        loss_critic = F.mse_loss(pred_values, target_value[..., None], reduction="none")
+        loss_critic = F.mse_loss(pred_values, target_value, reduction="none")
 
         loss_critic = loss_critic.sum(2).mean()
 
@@ -380,7 +375,6 @@ class SVGAgent(SACAgent):
         rollout_horizon: int,
         mve_horizon=None,
         log_pi=None,
-        regularized=True,
         log=False,
         prediction_strategy=None,
         **kwargs,
@@ -414,20 +408,7 @@ class SVGAgent(SACAgent):
                 if step < mve_horizon:
                     obss.append(obs)
                     actions.append(action)
-            else:
-                log_pi = None
 
-            # Predict observation
-            # obs, rewards_i, done_i, info_s = self.predict_obs(
-            #     ctx_modules.model_step,
-            #     obs,
-            #     action,
-            #     done,
-            #     ctx_modules.alpha,
-            #     log_pi=log_pi,
-            #     log=log,
-            #     regularized=regularized,
-            # )
             obs, rewards_i, done_i, info_s = ctx_modules.model_step(
                 action, obs, prediction_strategy=prediction_strategy
             )
@@ -461,7 +442,7 @@ class SVGAgent(SACAgent):
         critic_target,
     ):
         with torch.no_grad():
-            q_values = critic_target(last_sa)
+            q_values = critic_target(last_sa).t()
             q_values = self._reduce(q_values, "min")
             if self.critic_scaled:
                 reward_lb, reward_ub = torch.quantile(rewards, self.q_th)
@@ -472,13 +453,13 @@ class SVGAgent(SACAgent):
             target_rewards[1:, ...].sub_(alpha.detach() * log_pis[1:, ...])
             target_values = discounts.mm(target_rewards * batch_masks)
 
-        pred_values = critic(batch_sa.detach())
+        pred_values = critic(batch_sa.detach()).t()
         pred_values = pred_values.view(
             -1, self.batch_size, self.num_critic_ensemble
         ).contiguous()
         deviation = discounts.shape[1] - discounts.shape[0]
         pred_values.mul_(batch_masks[:-deviation, :, None])
-        return target_values, pred_values
+        return target_values[..., None], pred_values
 
     def update(self, first_update=False, **kwargs):
         log = self.is_epoch_done
@@ -574,8 +555,8 @@ class SVGAgent(SACAgent):
         self._info["num_updated"] = self.num_updated
         return self._info
 
-    def _actor_loss(self, ctx_modules, log_pis, last_sa, rewards, masks):
-        q_preds = ctx_modules.critic_svg(last_sa)
+    def _actor_loss(self, ctx_modules, log_pis, last_sa, rewards, masks, log=False):
+        q_preds = ctx_modules.critic_svg(last_sa).t()
         q_pred = self._reduce(q_preds, self.actor_reduction)
         mc_q_pred = torch.cat([rewards, q_pred[None, :, 0]])
         mc_q_pred.sub_(ctx_modules.alpha.detach() * log_pis)
@@ -637,10 +618,11 @@ class SVGAgent(SACAgent):
                 log_pis,
                 rewards,
                 last_sa,
+                log,
             )
         else:
             mc_v_target = self._actor_loss(
-                ctx_modules, log_pis, last_sa, rewards, batch_mask
+                ctx_modules, log_pis, last_sa, rewards, batch_mask, log
             )
         # Stochastic Value Gradient
         loss_actor = -mc_v_target.mean()

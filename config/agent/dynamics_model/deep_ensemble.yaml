@@ -5,7 +5,7 @@ dim_hidden: 256
 normalize_layer: True
 #noise_lr:
 drop_rate_base: 1e-2
-noise_wd: 1e-3
+noise_wd: 1e-2
 lb_std: 1e-3
 weight_decay_base: 1e-4
 weight_decay_ratios:
