@@ -14,6 +14,8 @@ from erl_lib.base import (
     MASK,
     NEXT_OBS,
     WEIGHT,
+    Q_MEAN,
+    Q_STD,
     KEY_ACTOR_LOSS,
     KEY_CRITIC_LOSS,
 )
@@ -53,6 +55,9 @@ class SACAgent(BaseAgent):
         critic_subset_size: int,
         num_critic_iter,
         critic_lr_ratio: float,
+        scaled_critic: bool,
+        bounded_critic: bool,
+        weighted_critic: bool,
         reward_q_th_lb: float,
         normalized_reward: bool,
         # Actor
@@ -76,11 +81,14 @@ class SACAgent(BaseAgent):
         self.warm_start = warm_start
         # Critic
         assert 0 <= reward_q_th_lb <= 1
-        self.reward_q_th = (reward_q_th_lb, 1- reward_q_th_lb)
+        self.reward_q_th = (reward_q_th_lb, 1 - reward_q_th_lb)
         self.build_critics(critic)
         self.critic_tau = critic_tau
         self.num_critic_iter = num_critic_iter
         self.critic_lr_ratio = critic_lr_ratio
+        self.scaled_critic = scaled_critic
+        self.bounded_critic = bounded_critic
+        self.weighted_critic = weighted_critic
         self.critic_subset_size = critic_subset_size
         self.num_critic_ensemble = critic.num_members
         self.clip_grad_norm = clip_grad_norm
@@ -88,10 +96,11 @@ class SACAgent(BaseAgent):
         self.weight_rate = torch.ones(
             (self.batch_size, self.num_critic_ensemble), device=self.device
         )
-        if self.critic_scaled:
-            self.q_th = torch.tensor(self.reward_q_th, device=self.device)
-            self._q_lb = None
-            self._q_ub = None
+        self.critic_loss_weight = Exponential(self.weight_rate).sample()
+        # if self.critic_scaled:
+        self.q_th = torch.tensor(self.reward_q_th, device=self.device)
+        self._q_lb = None
+        self._q_ub = None
         # Actor
         self.actor = hydra.utils.instantiate(actor).to(self.device)
         self.actor_reduction = actor_reduction
@@ -140,9 +149,6 @@ class SACAgent(BaseAgent):
         self.num_updated = 0
 
     def build_critics(self, critic_cfg):
-        self.critic_scale_factor = critic_cfg.bound_factor
-        self.critic_scaled = critic_cfg.bounded_prediction
-
         self.critic_target = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -244,8 +250,8 @@ class SACAgent(BaseAgent):
                 self._info.update(
                     **{
                         "gradient-norm": calc_grad_norm(self.critic),
-                        "q_value-mean": q_values.detach().mean(),
-                        "q_value-std": q_values.detach().std(-1).mean(),
+                        Q_MEAN: q_values.detach().mean(),
+                        Q_STD: q_values.detach().std(-1).mean(),
                     }
                 )
 
@@ -268,6 +274,7 @@ class SACAgent(BaseAgent):
         sa = torch.cat([obs, action], 1)
         q_values = self.critic(sa)
         qf_loss = F.mse_loss(q_values, target_value, reduction="none")
+
         # qf_loss = qf_loss * self.critic_loss_weight
         qf_loss = qf_loss.sum(-1).mean()
         return qf_loss, q_values.detach()
@@ -316,19 +323,27 @@ class SACAgent(BaseAgent):
         scale = 1.0 / (1 - self.discount)
         q_ub = reward_ub * scale
         q_lb = reward_lb * scale
-        w = (q_ub - q_lb) * .5
-        c = (q_ub + q_lb) * .5
-        q_lb = c - w * self.critic_scale_factor
-        q_ub = c + w * self.critic_scale_factor
+        w = (q_ub - q_lb) * 0.5
+        c = (q_ub + q_lb) * 0.5
+        q_lb = c - w
+        q_ub = c + w
         if self._q_ub is None:
             self._q_lb = q_lb
             self._q_ub = q_ub
         else:
-            self._q_lb.lerp_(q_lb, self.lr_loss_norm)
-            self._q_ub.lerp_(q_ub, self.lr_loss_norm)
+            self._q_lb.lerp_(q_lb, self.lr)
+            self._q_ub.lerp_(q_ub, self.lr)
+        self._q_center = (self._q_ub + self._q_lb) * 0.5
+        self._q_width = (self._q_ub - self._q_lb) * 0.5
 
-        self._info.update(**{"reward_ub": reward_ub, "reward_lb": reward_lb,
-                             "q_ub": self._q_ub, "q_lb": self._q_lb})
+        self._info.update(
+            **{
+                "reward_ub": reward_ub,
+                "reward_lb": reward_lb,
+                "q_ub": self._q_ub,
+                "q_lb": self._q_lb,
+            }
+        )
 
     def _reduce(self, values, reduction="min"):
         if reduction in ("min", "max"):
@@ -385,7 +400,11 @@ class SACAgent(BaseAgent):
 
     @property
     def num_opt_steps(self):
-        last_steps = self.total_iters if self.warm_start and (self.total_iters == self.seed_iters) else 1
+        last_steps = (
+            self.total_iters
+            if self.warm_start and (self.total_iters == self.seed_iters)
+            else 1
+        )
         return int(
             self.num_policy_opt_per_step
             # * self.steps_per_iter

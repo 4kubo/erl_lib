@@ -20,5 +20,7 @@ EPISODES_TOTAL = "episodes_total"
 EPOCH = "epoch"
 EVAL = "eval"
 
+Q_MEAN = "q_mean"
+Q_STD = "q_std"
 KEY_ACTOR_LOSS = "actor_loss"
 KEY_CRITIC_LOSS = "critic_loss"

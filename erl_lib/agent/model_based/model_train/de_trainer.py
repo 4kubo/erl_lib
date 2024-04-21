@@ -65,9 +65,6 @@ class DETrainer:
         keep_epochs: int = 1,
     ):
         """Trains the model for some number of epochs."""
-        # Back to old model a little bit
-        self.model.reset_model(self.tau)
-
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
         best_val_score, _ = self.evaluate(dataset_eval)
 

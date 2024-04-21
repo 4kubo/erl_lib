@@ -26,6 +26,9 @@ critic_lr_ratio: 1.0
 reward_q_th_lb: 0.01
 normalize_input: False
 normalized_reward: False
+bounded_critic: False
+scaled_critic: False
+weighted_critic: False
 # Actor
 actor_reduction: min
 actor_tau: 1.0

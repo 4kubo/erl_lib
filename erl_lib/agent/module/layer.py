@@ -31,53 +31,35 @@ class EnsembleLinearLayer(nn.Module):
         self.in_size = in_size
         self.out_size = out_size
         self.weight_decay = weight_decay
-        self._weight = nn.Parameter(
+        self.weight = nn.Parameter(
             torch.zeros(self.num_members, self.in_size, self.out_size)
         )
-        self._bias = nn.Parameter(torch.zeros(self.num_members, 1, self.out_size))
+        self.bias = nn.Parameter(torch.zeros(self.num_members, 1, self.out_size))
         self._index = None
 
         self.apply(ensemble_kaiming_normal)
 
     def forward(self, x):
-        return x.matmul(self.weight).add(self.bias)
-
-    def set_index(self, index):
-        self._index = index
-
-    @property
-    def weight(self):
-        if self.training or self._index is None:
-            return self._weight
-        else:
-            return self._weight[self._index, ...]
-
-    # @weight.setter
-    # def weight(self, idx):
-    #     self._weight = self._weight_param[idx, ...]
-
-    @property
-    def bias(self):
-        if self.training or self._index is None:
-            return self._bias
-        else:
-            return self._bias[self._index, ...]
+        h = x.matmul(self.weight).add(self.bias)
+        self._index = None
+        return h
     #
-    # @bias.setter
-    # def bias(self, idx):
-    #     self._bias = self._bias_param[idx, ...]
-
-    # def get_weight_at(self, idx):
-    #     weights = [self.weight[idx, ...].cpu().numpy()]
-    #     weights += [self.bias[idx, ...].cpu().numpy()]
-    #     return weights
+    # def set_index(self, index):
+    #     self._index = index
     #
-    # def set_weight_at(self, weights, idx):
-    #     weight, bias = weights
-    #     weight = torch.as_tensor(weight, device=self.weight.device)
-    #     bias = torch.as_tensor(bias, device=self.weight.device)
-    #     self.weight[idx, ...].copy_(weight)
-    #     self.bias[idx, ...].copy_(bias)
+    # @property
+    # def weight(self):
+    #     if self.training or self._index is None:
+    #         return self._weight
+    #     else:
+    #         return self._weight[self._index, ...]
+    #
+    # @property
+    # def bias(self):
+    #     if self.training or self._index is None:
+    #         return self._bias
+    #     else:
+    #         return self._bias[self._index, ...]
 
     def extra_repr(self) -> str:
         return (
@@ -95,6 +77,7 @@ class NormalizedEnsembleLinear(nn.Module):
         dropout_rate=0.0,
         normalize_eps: float = 0.0,
         dim_output=None,
+        residual=False,
         activation=None,
     ):
         super().__init__()
@@ -103,20 +86,22 @@ class NormalizedEnsembleLinear(nn.Module):
 
         if dim_output is None:
             dim_output = dim_input
-
-        linear = EnsembleLinearLayer(
-            num_members, dim_input, dim_output, weight_decay=weight_decay
-        )
+            self.residual = residual
+        else:
+            self.residual = False
 
         layers = []
         if isinstance(normalize_eps, float) and 0 < normalize_eps:
             layers.append(
-                nn.LayerNorm(dim_input, elementwise_affine=True, eps=normalize_eps)
+                nn.LayerNorm(dim_input, elementwise_affine=False, eps=normalize_eps)
             )
             self.idx_linear = 1
         else:
             self.idx_linear = 0
 
+        linear = EnsembleLinearLayer(
+            num_members, dim_input, dim_output, weight_decay=weight_decay
+        )
         layers.append(linear)
         if 0 < dropout_rate:
             layers.append(nn.Dropout(p=dropout_rate))
@@ -127,12 +112,20 @@ class NormalizedEnsembleLinear(nn.Module):
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.layers(x)
+        h = self.layers(x)
+        if self.residual:
+            h += x
+        return h
+
+    def set_index(self, index):
+        self.layers[self.idx_linear].set_index(index)
 
     @property
     def weight(self):
-        return self.get_parameter(f"layers.{self.idx_linear}.weight")
+        # return self.get_parameter(f"layers.{self.idx_linear}.weight")
+        return self.layers[self.idx_linear].weight
 
     @property
     def bias(self):
-        return self.get_parameter(f"layers.{self.idx_linear}.bias")
+        # return self.get_parameter(f"layers.{self.idx_linear}.bias")
+        return self.layers[self.idx_linear].bias

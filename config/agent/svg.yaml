@@ -15,6 +15,9 @@ actor_reduction: mean
 init_alpha: 0.1
 critic_lr_ratio: 1.0
 num_critic_iter:
+bounded_critic: True
+scaled_critic: True
+weighted_critic: False
 # SVG specific
 update_after_episode: True
 retain_model_buffer_iter: 10

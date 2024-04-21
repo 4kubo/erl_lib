@@ -7,7 +7,7 @@ normalize_layer: True
 drop_rate_base: 1e-2
 noise_wd: 1e-2
 lb_std: 1e-3
-weight_decay_base: 1e-4
+weight_decay_base: 1e-3
 weight_decay_ratios:
   - 0.25
   - 0.5
@@ -16,4 +16,5 @@ weight_decay_ratios:
 priors_on_function_values: False
 prediction_strategy: ts_1
 mse_score: False
-normalized_target: False
+normalized_target: True
+residual: False

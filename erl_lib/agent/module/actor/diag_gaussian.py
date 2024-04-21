@@ -63,8 +63,6 @@ class DiagGaussianActor(nn.Module):
 
     def __init__(self, dim_obs, dim_act, dim_hidden, num_hidden, log_std_bounds):
         super().__init__()
-        self.log_std_bounds = log_std_bounds
-
         layers = [nn.Linear(dim_obs, dim_hidden), nn.SiLU()]
         for i in range(num_hidden - 1):
             layers += [nn.Linear(dim_hidden, dim_hidden), nn.SiLU()]
@@ -78,17 +76,14 @@ class DiagGaussianActor(nn.Module):
     def forward(self, obs, log=False):
         mu, raw_log_std = self.hidden_layers(obs).chunk(2, dim=-1)
 
-        log_std = torch.tanh(raw_log_std)
-        log_std_min, log_std_max = self.log_std_bounds
-        log_std = log_std_min + 0.5 * (log_std_max - log_std_min) * (log_std + 1)
-        std = log_std.exp()
-
+        std = F.softplus(raw_log_std) + 1e-5
         dist = SquashedNormal(mu, std)
 
         if log:
             with torch.no_grad():
                 q005, q025, q05, q095 = torch.quantile(
-                    raw_log_std, torch.tensor([0.05, 0.25, 0.5, 0.95], device=obs.device)
+                    raw_log_std,
+                    torch.tensor([0.05, 0.95], device=obs.device),
                 )
                 self.info.update(
                     actor_raw_logstd_005=q005,

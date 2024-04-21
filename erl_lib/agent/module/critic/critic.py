@@ -26,7 +26,6 @@ class EnsembleCriticNetwork(nn.Module):
         self.dim_hidden = dim_hidden
         self.num_hidden = num_hidden
         self.num_members = num_members
-        self.bound_factor = bound_factor
         self.info = {}
 
         layers = [
@@ -51,4 +50,4 @@ class EnsembleCriticNetwork(nn.Module):
 
     def forward(self, xu):
         pred = self.hidden_layers(xu)
-        return pred[..., 0]
+        return pred[..., 0].t()

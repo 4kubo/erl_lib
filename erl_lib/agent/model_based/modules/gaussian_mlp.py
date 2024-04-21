@@ -39,6 +39,7 @@ class GaussianMLP(Model):
         noise_wd: float = 0.0,
         # noise_lr: float = 1e-2,
         normalize_layer: bool = True,
+        residual: bool = False,
         lb_std: float = 1e-3,
         drop_rate_base: float = 0.01,
         weight_decay_base: float = 0.001,
@@ -60,11 +61,7 @@ class GaussianMLP(Model):
         self.normalize_io = normalize_io
         self.num_members = num_members
         self.noise_wd = noise_wd
-        # self.noise_lr = noise_lr
-        self.lb_std = lb_std or 0
-        self.lb_log_scale = (
-            np.log(lb_std) if (lb_std is not None and 0 < lb_std) else None
-        )
+
         self.weight_decay_base = weight_decay_base
         self.normalized_reward = normalized_reward
         self.priors_on_function_values = priors_on_function_values
@@ -74,35 +71,56 @@ class GaussianMLP(Model):
         self.normalized_target = normalized_target
         self.mse_score = mse_score
 
-        # Build neural network model
-        weight_decays = np.asarray(weight_decay_ratios) * weight_decay_base
-        num_layers = len(weight_decay_ratios)
-        # drop_rs = np.asarray(weight_decay_ratios[::-1]) * drop_rate_base
-        drop_rs = np.asarray(weight_decay_ratios) * drop_rate_base
-        layers = []
-        dims = [self.dim_input] + [dim_hidden] * (num_layers - 1) + [self.dim_output]
-        for i, (dim_input, dim_output, wd_i, dr_i) in enumerate(
-            zip(dims[:-1], dims[1:], weight_decays, drop_rs)
-        ):
-            if normalize_layer and 0 < i:
-                layers += [nn.LayerNorm(dim_input, elementwise_affine=False)]
-            if 1 < num_members:
-                layers += [
-                    EnsembleLinearLayer(
-                        num_members, dim_input, dim_output, weight_decay=wd_i
-                    )
-                ]
-            else:
-                linear = nn.Linear(dim_input, dim_output)
-                linear.weight_decay = wd_i
-                layers += [linear]
+        depth = len(weight_decay_ratios)
+        max_ratio = max(weight_decay_ratios)
+        wd_ratio_i = weight_decay_ratios[0]
+        wd_0 = wd_ratio_i * weight_decay_base
+        dr_0 = (max_ratio - wd_ratio_i) * drop_rate_base
+        hidden_layers = [
+            NormalizedEnsembleLinear(
+                num_members,
+                self.dim_input,
+                dim_output=dim_hidden,
+                weight_decay=wd_0,
+                dropout_rate=dr_0,
+                normalize_eps=0,
+                activation=nn.SiLU(),
+            ),
+        ]
 
-            if 0 < dr_i < 1:
-                layers += [nn.Dropout(dr_i, inplace=True)]
-            if i != num_layers - 1:
-                layers += [nn.SiLU(inplace=True)]
+        for i, wd_ratio_i in enumerate(weight_decay_ratios[1:-1]):
+            wd_i = wd_ratio_i * weight_decay_base
+            dr_i = (max_ratio - wd_ratio_i) * drop_rate_base
+            eps_i = min(max(np.power(10.0, -i), 1e-5), 1.0)
+            hidden_layers.append(
+                NormalizedEnsembleLinear(
+                    num_members,
+                    dim_hidden,
+                    weight_decay=wd_i,
+                    dropout_rate=dr_i,
+                    activation=nn.SiLU(),
+                    normalize_eps=eps_i,
+                    residual=residual,
+                )
+            )
 
-        self.layers = nn.Sequential(*layers)
+        ratio_last = weight_decay_ratios[-1]
+        wd_last = ratio_last * weight_decay_base
+        dr_last = (max_ratio - ratio_last) * drop_rate_base
+
+        eps_last = min(max(np.power(10.0, -(depth - 2)), 1e-5), 1.0)
+        hidden_layers.append(
+            NormalizedEnsembleLinear(
+                num_members,
+                dim_hidden,
+                dim_output=self.dim_output,
+                weight_decay=wd_last,
+                dropout_rate=dr_last,
+                normalize_eps=eps_last,
+            )
+        )
+
+        self.layers = nn.Sequential(*hidden_layers)
 
         # Homo-scedastic noise
         self._log_noise = nn.Parameter(
@@ -113,13 +131,12 @@ class GaussianMLP(Model):
 
         self._old_log_noise = self._log_noise.detach().clone()
 
-        self.eval()
+        self.lb_std = lb_std or 0
+        self.lb_log_scale = (
+            np.log(lb_std) if (lb_std is not None and 0 < lb_std) else None
+        )
 
-    def reset_model(self, tau=1.0):
-        with torch.no_grad():
-            if 0 <= tau < 1.0:
-                self._old_log_noise.data.lerp_(self._log_noise.clone(), tau)
-                self._log_noise.data.copy_(self._old_log_noise.clone())
+        self.eval()
 
     def base_forward(self, x: torch.Tensor, normalize_io=None):
         """"""
@@ -138,7 +155,7 @@ class GaussianMLP(Model):
             log_std_ale = self._log_noise
         return mus, log_std_ale
 
-    def moment_dist(self, x, normalize_io=None):
+    def moment_dist(self, x, normalize_io=None, log=False):
         """Mu and sigma in Gaussian distribution's parameter."""
         mus = self.layers(x)
         log_var_ale = self._log_noise.mean(0) * 2
@@ -166,42 +183,48 @@ class GaussianMLP(Model):
             log_var_epi += sample_log_var
             log_var_ale += sample_log_var
 
-        var_epi = log_var_epi.exp()
-        variance = log_var_ale.exp() + var_epi
-        log_std_epi = log_var_epi * 0.5
-        log_std_ale = log_var_ale * 0.5
-
-        return mu, variance, var_epi, log_std_epi, log_std_ale
+        # return mu, variance, var_epi, log_std_epi, log_std_ale
+        return mu, log_var_epi, log_var_ale
 
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
         """"""
         assert x.ndim == 2
         assert not self.layers.training
-        if (prediction_strategy or self.prediction_strategy) in (PS_TS1, PS_INF):
-            if self.prediction_strategy == PS_TS1:
-                ensemble_idx = torch.randperm(self.num_members, device=self.device)
-                for layer in self.layers:
-                    if isinstance(layer, EnsembleLinearLayer):
-                        layer.set_index(ensemble_idx)
+        prediction_strategy = prediction_strategy or self.prediction_strategy
+        if prediction_strategy in (PS_TS1, PS_INF):
+            if prediction_strategy == PS_TS1:
+                roll_idx = torch.randperm(self.num_members, device=self.device)
+                reroll_idx = roll_idx.argsort()
 
-                log_std_ale = self._log_noise[ensemble_idx, ...]
+                # # roll_idx = torch.arange(self.num_members, device=self.device)
+                # for layer in self.layers:
+                #     if isinstance(layer, (
+                #     EnsembleLinearLayer, NormalizedEnsembleLinear)):
+                #         layer.set_index(roll_idx)
+                #     else:
+                #         print(layer)
+                #
+                log_std_ale = self._log_noise[roll_idx, ...]
             else:
                 log_std_ale = self._log_noise
 
             batch_size = x.shape[0]
             num_samples_per_member = batch_size // self.num_members
             x = x.view(self.num_members, num_samples_per_member, self.dim_input)
-            mu = self.layers(x).view(batch_size, self.dim_output)
+            x = x[roll_idx, ...]
+            mu = self.layers(x)
+            mu = mu[reroll_idx, ...].view(batch_size, self.dim_output)
 
-            log_std_ale = (
-                log_std_ale.repeat(1, num_samples_per_member, 1)
-                .contiguous()
-                .view(batch_size, self.dim_output)
+            log_std_ale = log_std_ale.repeat(1, num_samples_per_member, 1).view(
+                batch_size, self.dim_output
             )
 
             scale = log_std_ale.exp()
         else:
-            mu, variance = self.moment_dist(x, normalize_io=False)[:2]
+            mu, log_var_epi, log_var_ale = self.moment_dist(
+                x, normalize_io=False, **kwargs
+            )
+            variance = log_var_ale.exp() + log_var_epi.exp()
             scale = variance.sqrt()
 
         return mu, scale
@@ -223,11 +246,9 @@ class GaussianMLP(Model):
         normalize_io = self.normalize_io and not self.normalized_target
         mus, log_std_ale = self.base_forward(model_in, normalize_io=normalize_io)
         # Preprocess on target values
-        if 1 < self.num_members:
-            target = target[None, ...].repeat(self.num_members, 1, 1)
-            weight = weight.t()
-        else:
-            weight = None
+        target = target[None, ...].repeat(self.num_members, 1, 1)
+        target += torch.randn_like(target) * self.lb_std
+        weight = weight.t()
         # Calculate loss
         loss = self.nll_loss(mus, log_std_ale, target, weight)
 
@@ -284,9 +305,16 @@ class GaussianMLP(Model):
 
             variance = var_epi + (2 * log_std_ale).exp()
         else:
-            mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(
-                model_in, normalize_io
+            # mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(
+            #     model_in, normalize_io
+            # )
+            mu, log_var_epi, log_var_ale = self.moment_dist(
+                model_in, normalize_io=normalize_io
             )
+            var_epi = log_var_epi.exp()
+            variance = log_var_ale.exp() + var_epi
+            # log_std_epi = log_var_epi * 0.5
+            log_std_ale = log_var_ale * 0.5
             scale_log = variance.log() * 0.5
 
             error = torch.square(target - mu)  # [B, D]
@@ -310,7 +338,9 @@ class GaussianMLP(Model):
     def decay_loss(self) -> torch.Tensor:
         decay_loss: torch.Tensor = 0.0  # type: ignore
         for layer in self.layers:
-            if isinstance(layer, (nn.Linear, NormalizedEnsembleLinear)):
+            if isinstance(
+                layer, (nn.Linear, NormalizedEnsembleLinear, EnsembleLinearLayer)
+            ):
                 decay_loss_m = torch.sum(torch.square(layer.weight))
                 decay_loss_m += torch.sum(torch.square(layer.bias))
                 decay_loss += layer.weight_decay * decay_loss_m * 0.5
