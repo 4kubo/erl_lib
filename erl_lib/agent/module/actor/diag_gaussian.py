@@ -61,7 +61,7 @@ class DiagGaussianActor(nn.Module):
 
     deterministic = False
 
-    def __init__(self, dim_obs, dim_act, dim_hidden, num_hidden, log_std_bounds):
+    def __init__(self, dim_obs, dim_act, dim_hidden, num_hidden):
         super().__init__()
         layers = [nn.Linear(dim_obs, dim_hidden), nn.SiLU()]
         for i in range(num_hidden - 1):

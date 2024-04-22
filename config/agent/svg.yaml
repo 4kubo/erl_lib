@@ -24,7 +24,7 @@ retain_model_buffer_iter: 10
 rollout_horizon: 20
 rollout_freq: 20
 training_rollout_horizon: 5
-mve_horizon: 5
+mve_horizon: 1
 gae_lambda: 0.0
 learned_reward: True
 split_validation: True

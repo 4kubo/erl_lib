@@ -39,8 +39,6 @@ class EnsembleCriticNetwork(nn.Module):
                     nn.SiLU(),
                 )
             )
-            if 0 < norm_eps:
-                layers.append(nn.LayerNorm(dim_hidden, eps=norm_eps, elementwise_affine=False))
 
         layers.append(EnsembleLinearLayer(num_members, dim_hidden, dim_output))
         self.hidden_layers = nn.Sequential(*layers)
