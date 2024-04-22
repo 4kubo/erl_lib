@@ -192,28 +192,19 @@ class GaussianMLP(Model):
         assert not self.layers.training
         prediction_strategy = prediction_strategy or self.prediction_strategy
         if prediction_strategy in (PS_TS1, PS_INF):
-            if prediction_strategy == PS_TS1:
-                roll_idx = torch.randperm(self.num_members, device=self.device)
-                reroll_idx = roll_idx.argsort()
-
-                # # roll_idx = torch.arange(self.num_members, device=self.device)
-                # for layer in self.layers:
-                #     if isinstance(layer, (
-                #     EnsembleLinearLayer, NormalizedEnsembleLinear)):
-                #         layer.set_index(roll_idx)
-                #     else:
-                #         print(layer)
-                #
-                log_std_ale = self._log_noise[roll_idx, ...]
-            else:
-                log_std_ale = self._log_noise
-
             batch_size = x.shape[0]
             num_samples_per_member = batch_size // self.num_members
             x = x.view(self.num_members, num_samples_per_member, self.dim_input)
-            x = x[roll_idx, ...]
-            mu = self.layers(x)
-            mu = mu[reroll_idx, ...].view(batch_size, self.dim_output)
+            if prediction_strategy == PS_TS1:
+                shuffle_idx = torch.randperm(self.num_members, device=self.device)
+                reshuffle_idx = shuffle_idx.argsort()
+                log_std_ale = self._log_noise[shuffle_idx, ...]
+                x = x[shuffle_idx, ...]
+                mu = self.layers(x)
+                mu = mu[reshuffle_idx, ...].view(batch_size, self.dim_output)
+            else:
+                log_std_ale = self._log_noise
+                mu = self.layers(x).view(batch_size, self.dim_output)
 
             log_std_ale = log_std_ale.repeat(1, num_samples_per_member, 1).view(
                 batch_size, self.dim_output
@@ -305,15 +296,11 @@ class GaussianMLP(Model):
 
             variance = var_epi + (2 * log_std_ale).exp()
         else:
-            # mu, variance, var_epi, log_std_epi, log_std_ale = self.moment_dist(
-            #     model_in, normalize_io
-            # )
             mu, log_var_epi, log_var_ale = self.moment_dist(
                 model_in, normalize_io=normalize_io
             )
             var_epi = log_var_epi.exp()
             variance = log_var_ale.exp() + var_epi
-            # log_std_epi = log_var_epi * 0.5
             log_std_ale = log_var_ale * 0.5
             scale_log = variance.log() * 0.5
 
@@ -394,7 +381,7 @@ class GaussianMLP(Model):
 
         epsilon = torch.randn_like(obs)
         if self.output_normalizer:
-            mu[:, 1:] += scale[:, 1:] * epsilon
+            mu[..., 1:] += scale[..., 1:] * epsilon
 
             if self.learned_reward:
                 assert self.input_normalizer is not None
@@ -404,10 +391,10 @@ class GaussianMLP(Model):
                     self.output_normalizer.std,
                 )
                 if self.normalized_reward:
-                    mu[:, 1:] = output_mu[:, 1:] + mu[:, 1:] * output_std[:, 1:]
+                    mu[..., 1:] = output_mu[..., 1:] + mu[..., 1:] * output_std[..., 1:]
                 else:
                     mu = output_mu + mu * output_std
-                reward, obs_diff = torch.tensor_split(mu, [1], dim=1)
+                reward, obs_diff = torch.tensor_split(mu, [1], dim=-1)
                 obs_diff /= input_std
             else:
                 reward = False
@@ -423,7 +410,7 @@ class GaussianMLP(Model):
                 terminated = False
         else:
             if self.learned_reward:
-                reward, obs_mu = torch.tensor_split(mu, [1], dim=1)
+                reward, obs_mu = torch.tensor_split(mu, [1], dim=-1)
                 obs_scale = scale[:, 1:]
             else:
                 obs_mu = mu

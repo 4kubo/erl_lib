@@ -81,7 +81,7 @@ class DiagGaussianActor(nn.Module):
 
         if log:
             with torch.no_grad():
-                q005, q025, q05, q095 = torch.quantile(
+                q005, q095 = torch.quantile(
                     raw_log_std,
                     torch.tensor([0.05, 0.95], device=obs.device),
                 )

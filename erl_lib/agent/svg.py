@@ -248,7 +248,9 @@ class SVGAgent(SACAgent):
         while True:
             batch = self.replay_buffer.sample(self.batch_size)
             obs = batch.obs
-            with torch.no_grad(), self.policy_evaluation_context(**rollout_kwargs) as ctx_modules:
+            with torch.no_grad(), self.policy_evaluation_context(
+                **rollout_kwargs
+            ) as ctx_modules:
                 # The case using replay buffer
                 if self.input_normalizer:
                     obs = self.input_normalizer.normalize(obs)
@@ -278,8 +280,6 @@ class SVGAgent(SACAgent):
             with self.policy_evaluation_context() as ctx_modules:
                 batch = ctx_modules.buffer.sample(self.batch_size)
                 obs = batch.obs.clone()
-                # ctx_modules.critic.train()
-                # ctx_modules.critic_target.eval()
                 # The case using replay buffer
                 if self.rollout_horizon <= 0 and self.input_normalizer:
                     obs = self.input_normalizer.normalize(obs)
@@ -415,7 +415,10 @@ class SVGAgent(SACAgent):
                     actions.append(action)
 
             obs, rewards_i, done_i, info_s = ctx_modules.model_step(
-                action, obs, prediction_strategy=prediction_strategy, log=log,
+                action,
+                obs,
+                prediction_strategy=prediction_strategy,
+                log=log,
             )
 
             rewards.append(rewards_i[:, 0])
@@ -448,12 +451,6 @@ class SVGAgent(SACAgent):
     ):
         with torch.no_grad():
             q_values = critic_target(last_sa)
-            # q_values = self._reduce(q_values, "min")
-            # if self.bounded_critic:
-            #     reward_lb, reward_ub = torch.quantile(rewards, self.q_th)
-            #     self.update_critic_bound(reward_lb, reward_ub)
-            #     q_values = self._q_ub - torch.relu(self._q_ub - q_values)
-            #     q_values = self._q_lb + torch.relu(q_values - self._q_lb)
             target_rewards = torch.cat([rewards, q_values[None, :, 0]])
             target_rewards[1:, ...].sub_(alpha.detach() * log_pis[1:, ...])
             target_values = discounts.mm(target_rewards * batch_masks)
@@ -508,8 +505,6 @@ class SVGAgent(SACAgent):
         with self.policy_evaluation_context(**ctx_kwargs) as ctx_modules:
             batch = ctx_modules.buffer.sample(self.batch_size)
             obs = batch.obs.clone()
-            # ctx_modules.critic.train()
-            # ctx_modules.critic_target.eval()
             # The case using replay buffer
             if self.rollout_horizon <= 0 and self.input_normalizer:
                 obs = self.input_normalizer.normalize(obs)
