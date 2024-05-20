@@ -39,9 +39,9 @@ def weight_init(m):
 
 
 def soft_bound(x, ub=None, lb=None, beta=1):
-    if ub:
+    if ub is not None:
         x = ub - nn.functional.softplus(ub - x, beta=beta)
-    if lb:
+    if lb is not None:
         x = x.sub(lb)
         x = lb + nn.functional.softplus(x, beta=beta)
     return x

@@ -16,8 +16,6 @@ class EnsembleCriticNetwork(nn.Module):
         num_hidden,
         num_members,
         dim_output: int = 1,
-        norm_eps=0,
-        bound_factor: float = 1.0,
         **kwargs,
     ):
         super(EnsembleCriticNetwork, self).__init__()
@@ -48,4 +46,4 @@ class EnsembleCriticNetwork(nn.Module):
 
     def forward(self, xu):
         pred = self.hidden_layers(xu)
-        return pred[..., 0].t()
+        return pred.squeeze(-1).t()

@@ -43,23 +43,6 @@ class EnsembleLinearLayer(nn.Module):
         h = x.matmul(self.weight).add(self.bias)
         self._index = None
         return h
-    #
-    # def set_index(self, index):
-    #     self._index = index
-    #
-    # @property
-    # def weight(self):
-    #     if self.training or self._index is None:
-    #         return self._weight
-    #     else:
-    #         return self._weight[self._index, ...]
-    #
-    # @property
-    # def bias(self):
-    #     if self.training or self._index is None:
-    #         return self._bias
-    #     else:
-    #         return self._bias[self._index, ...]
 
     def extra_repr(self) -> str:
         return (

@@ -38,7 +38,6 @@ class GaussianMLP(Model):
         dim_hidden: int = 200,
         noise_wd: float = 0.0,
         # noise_lr: float = 1e-2,
-        normalize_layer: bool = True,
         residual: bool = False,
         lb_std: float = 1e-3,
         drop_rate_base: float = 0.01,
@@ -188,8 +187,8 @@ class GaussianMLP(Model):
 
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
         """"""
-        assert x.ndim == 2
-        assert not self.layers.training
+        # assert x.ndim == 2
+        # assert not self.layers.training
         prediction_strategy = prediction_strategy or self.prediction_strategy
         if prediction_strategy in (PS_TS1, PS_INF):
             batch_size = x.shape[0]
@@ -211,12 +210,15 @@ class GaussianMLP(Model):
             )
 
             scale = log_std_ale.exp()
-        else:
+        elif prediction_strategy == PS_MM:
             mu, log_var_epi, log_var_ale = self.moment_dist(
                 x, normalize_io=False, **kwargs
             )
             variance = log_var_ale.exp() + log_var_epi.exp()
             scale = variance.sqrt()
+        else:
+            mu = self.layers(x)
+            scale = self._log_noise.exp()
 
         return mu, scale
 
@@ -227,8 +229,7 @@ class GaussianMLP(Model):
         grad_clip: float = 0.0,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Updates the model given a batch of transitions and an optimizer."""
-        model_in, target, weight = self.process_batch(batch)
-        assert model_in.ndim == target.ndim
+        model_in, target, weight = self.process_batch(batch, training=True)
 
         self.train()
         optimizer.zero_grad()
@@ -236,9 +237,9 @@ class GaussianMLP(Model):
         # Predict
         normalize_io = self.normalize_io and not self.normalized_target
         mus, log_std_ale = self.base_forward(model_in, normalize_io=normalize_io)
-        # Preprocess on target values
-        target = target[None, ...].repeat(self.num_members, 1, 1)
-        target += torch.randn_like(target) * self.lb_std
+        # # Preprocess on target values
+        # target = target[None, ...].repeat(self.num_members, 1, 1)
+        # target += torch.randn_like(target) * self.lb_std
         weight = weight.t()
         # Calculate loss
         loss = self.nll_loss(mus, log_std_ale, target, weight)
@@ -339,6 +340,7 @@ class GaussianMLP(Model):
     def process_batch(
         self,
         batch: TransitionBatch,
+        training=False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         obs = batch.obs
         action = batch.action
@@ -359,6 +361,13 @@ class GaussianMLP(Model):
             target = torch.cat([batch.reward, target_obs], dim=obs.ndim - 1)
         else:
             target = target_obs
+
+        if training:
+            target = target[None, ...].repeat(self.num_members, 1, 1)
+            target[..., 0] += (
+                torch.randn(target.shape[:2], device=self.device) * self.lb_std
+            )
+
         if self.normalize_io and self.normalized_target:
             target = self.output_normalizer.normalize(target)
         return model_in, target.clone(), batch.weight
@@ -421,6 +430,9 @@ class GaussianMLP(Model):
                 terminated = self.term_fn(obs, act, next_obs)
             else:
                 terminated = False
+
+        if isinstance(terminated, bool):
+            terminated = torch.full_like(reward, terminated, dtype=torch.bool)
 
         return next_obs, reward, terminated, {}
 

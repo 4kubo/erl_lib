@@ -2,8 +2,6 @@ _target_: erl_lib.agent.model_based.modules.gaussian_mlp.GaussianMLP
 device: ${common.device}
 num_members: 8
 dim_hidden: 256
-normalize_layer: True
-#noise_lr:
 drop_rate_base: 1e-2
 noise_wd: 1e-2
 lb_std: 1e-3

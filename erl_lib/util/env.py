@@ -221,7 +221,7 @@ def make_envs(config_env, num_envs, log_dir=None):
     task_id = config_env.task_id
     action_repeat = config_env.get("action_repeat", 1)
     max_episode_steps = config_env.get("max_episode_steps", 1000)
-    env_kwargs = config_env.kwargs or {}
+    env_kwargs = {} if config_env.kwargs is None else dict(config_env.kwargs)
 
     if suite == "dmc":
         domain_name, task_name = task_id.split("-", 1)

@@ -11,6 +11,7 @@ buffer_size: 1000000
 max_batch_size: 100000
 warm_start: True
 buffer_device: cpu
+discount: 0.995
 actor_reduction: mean
 init_alpha: 0.1
 critic_lr_ratio: 1.0
@@ -25,12 +26,9 @@ rollout_horizon: 20
 rollout_freq: 20
 training_rollout_horizon: 5
 mve_horizon: 1
-gae_lambda: 0.0
 learned_reward: True
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
-critic:
-  bound_factor: 1.0
 # Common
 iters_per_epoch: 10
 steps_per_iter:

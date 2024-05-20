@@ -82,21 +82,17 @@ class SACAgent(BaseAgent):
         # Critic
         assert 0 <= reward_q_th_lb <= 1
         self.reward_q_th = (reward_q_th_lb, 1 - reward_q_th_lb)
-        self.build_critics(critic)
-        self.critic_tau = critic_tau
-        self.num_critic_iter = num_critic_iter
-        self.critic_lr_ratio = critic_lr_ratio
         self.scaled_critic = scaled_critic
         self.bounded_critic = bounded_critic
         self.weighted_critic = weighted_critic
+        self.critic_tau = critic_tau
+        self.num_critic_iter = num_critic_iter
+        self.critic_lr_ratio = critic_lr_ratio
         self.critic_subset_size = critic_subset_size
         self.num_critic_ensemble = critic.num_members
         self.clip_grad_norm = clip_grad_norm
         self.normalized_reward = normalized_reward
-        self.weight_rate = torch.ones(
-            (self.batch_size, self.num_critic_ensemble), device=self.device
-        )
-        self.critic_loss_weight = Exponential(self.weight_rate).sample()
+        self.build_critics(critic)
         # if self.critic_scaled:
         self.q_th = torch.tensor(self.reward_q_th, device=self.device)
         self._q_lb = None
@@ -152,6 +148,12 @@ class SACAgent(BaseAgent):
         self.critic_target = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
+
+        if self.weighted_critic:
+            weight_rate = torch.ones(
+                (self.batch_size, self.num_critic_ensemble), device=self.device
+            )
+            self.critic_loss_weight = Exponential(weight_rate).sample()
 
     def init_optimizer(self):
         # self.raw_alpha.data.copy_(self.init_raw_alpha)
@@ -218,6 +220,7 @@ class SACAgent(BaseAgent):
         buffer = buffer or self.replay_buffer
         obs, batch = self.update_critic(buffer, log)
         soft_update_params(self.critic, self.critic_target, self.critic_tau)
+        self.update_actor(obs, log=log)
 
     def update_critic(self, replay_buffer, log=False):
         for i in range(self.num_critic_iter):
@@ -275,11 +278,12 @@ class SACAgent(BaseAgent):
         q_values = self.critic(sa)
         qf_loss = F.mse_loss(q_values, target_value, reduction="none")
 
-        # qf_loss = qf_loss * self.critic_loss_weight
+        if self.weighted_critic:
+            qf_loss *= self.critic_loss_weight
         qf_loss = qf_loss.sum(-1).mean()
         return qf_loss, q_values.detach()
 
-    def update_actor(self, obs, log=False):
+    def update_actor(self, obs, log=False, **kwargs):
         dist = self.actor(obs)
         action = dist.rsample()
         log_pi = dist.log_prob(action).sum(-1, keepdim=True)
@@ -345,7 +349,14 @@ class SACAgent(BaseAgent):
             }
         )
 
-    def _reduce(self, values, reduction="min"):
+    def _reduce(self, values, reduction="min", dim=1, keepdim=True):
+        """
+
+        Args:
+            values: [..., C]
+            reduction: type of reduciton
+
+        """
         if reduction in ("min", "max"):
             if self.critic_subset_size < self.num_critic_ensemble:
                 # Randomized ensemble Q-learning
@@ -356,15 +367,15 @@ class SACAgent(BaseAgent):
                     self.critic_subset_size,
                     replace=False,
                 )
-                values = values[:, idx]
+                values = values[..., idx]
             if reduction == "min":
-                value = torch.min(values, 1, keepdim=True).values
+                value = torch.min(values, dim, keepdim=keepdim).values
             else:
-                value = torch.max(values, 1, keepdim=True).values
+                value = torch.max(values, dim, keepdim=keepdim).values
         else:
-            value = torch.mean(values, 1, keepdim=True)
+            value = torch.mean(values, dim, keepdim=keepdim)
             if reduction == "ub":
-                value += torch.std(values, 1, keepdim=True)
+                value += torch.std(values, dim, keepdim=keepdim)
 
         return value
 

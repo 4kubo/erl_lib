@@ -37,6 +37,6 @@ init_alpha: 1.0
 lr_alpha: ${agent.lr}
 entropy_balance: 1.0
 # Common
-steps_per_iter:                                                                                                                                                                                                              1
+steps_per_iter: 1
 iters_per_epoch: 10000
 seed_iters: 10000
