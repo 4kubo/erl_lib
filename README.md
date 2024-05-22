@@ -24,3 +24,5 @@ Execute ESVG algorithm with option `agent=svg`
 python train.py agent=svg log.log_dir=/tmp/svg env=dmc env.task_id=cheetah-run
 ```
 
+for the Gym tasks, set `env=gym` and `env.task_id` to one of "MBHumanoid-v0", "
+MBAnt-v0", "MBHopper-v0", "MBHalfCheetah-v0" and "MBWalker2d-v0".
