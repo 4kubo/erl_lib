@@ -46,7 +46,7 @@ class SVGAgent(SACAgent):
         **kwargs,
     ):
         if rollout_horizon <= 0:
-            # kwargs["buffer_device"] = "cuda"
+            kwargs["buffer_device"] = "cuda"
             rollout_freq = 0
         if kwargs["num_critic_iter"] is None:
             kwargs["num_critic_iter"] = int(kwargs["steps_per_iter"] / 4)
