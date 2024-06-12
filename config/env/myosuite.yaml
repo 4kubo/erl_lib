@@ -1,0 +1,4 @@
+suite: myosuite
+task_id: myoElbowPose1D6MRandom-v0
+max_episode_steps: 100
+kwargs:

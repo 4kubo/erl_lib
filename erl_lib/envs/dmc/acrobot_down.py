@@ -50,4 +50,5 @@ class BalanceDown(Balance):
         physics.named.data.qpos["shoulder"] = np.pi + self.random.randn() * 0.1
         physics.named.data.qpos["elbow"] = self.random.randn() * 0.1
 
-        super(Balance, self).initialize_episode(physics)
+        self.after_step(physics)
+        # super(Balance, self).initialize_episode(physics)

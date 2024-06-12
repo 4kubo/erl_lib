@@ -1,0 +1,4 @@
+suite: gym
+task_id: HandManipulateEggRotate-v1
+max_episode_steps: 100
+kwargs:
