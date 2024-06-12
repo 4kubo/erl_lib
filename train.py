@@ -8,6 +8,7 @@ import hydra
 import numpy as np
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 from erl_lib.util.env import make_envs
@@ -99,13 +100,12 @@ def run(cfg):
     kwargs_outer_trange["disable"] |= disable_outer
     agent.kwargs_trange["disable"] |= np.logical_not(disable_outer)
 
-    time_steps_total = agent.time_steps_total
     # Main outer loop
-    while time_steps_total < cfg.common.max_time_steps:
+    while agent.time_steps_total < cfg.common.max_time_steps:
         obs, info = envs.reset()
         agent.reset()
 
-        desc = f"@{time_steps_total: >10,}"
+        desc = f"@{agent.time_steps_total: >10,}"
         pbar = trange(agent.iters_this_epoch, desc=desc, **kwargs_outer_trange)
         # Main inner loop for interaction with the environment and the agent's update
         while not agent.is_epoch_done:
@@ -129,15 +129,16 @@ def run(cfg):
             stack_obs=cfg.common.eval.stack_obs,
             callbacks=callbacks_if_need(cfg),
         )
-        # if (
-        #     0 < cfg.log.epochs_per_checkpoint
-        #     and (epoch + 1) % cfg.log.timesteps_per_checkpoint == 0
-        # ):
-        #     dir_ckpt = f"{log_dir}/checkpoint/{epoch + 1:0>5}"
-        #     os.makedirs(dir_ckpt, exist_ok=True)
-        #     agent.save(dir_ckpt)
+        # Checkpoint
+        if cfg.log.checkpoint and not cfg.log.only_last_checkpoint:
+            dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"
+            os.makedirs(dir_ckpt, exist_ok=True)
+            agent.save(dir_ckpt)
 
-        time_steps_total = agent.time_steps_total
+    if cfg.log.checkpoint and cfg.log.only_last_checkpoint:
+        dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"
+        os.makedirs(dir_ckpt, exist_ok=True)
+        agent.save(dir_ckpt)
 
     logger.info(f"Finished @ Time steps {int(cfg.common.max_time_steps):,d}")
     envs.close()

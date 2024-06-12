@@ -6,7 +6,8 @@ defaults:
 log:
   log_dir: exp
   log_level: INFO
-  epochs_per_checkpoint: 0
+  checkpoint: False
+  only_last_checkpoint: True
   silent: False
   record: True
   wandb:

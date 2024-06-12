@@ -3,4 +3,6 @@ dim_obs: ${agent.dim_obs}
 dim_act: ${agent.dim_act}
 dim_hidden: 256
 num_hidden: 3
-num_members: 5
+num_members: 2
+dropout_rate: 0.0
+norm_eps: 0.0

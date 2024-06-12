@@ -20,8 +20,6 @@ class Model(nn.Module):
     Subclasses may also want to overrides :meth:`sample` and :meth:`reset`.
     """
 
-    _MODEL_FNAME = "model.pth"
-
     def __init__(self, dim_input: int, dim_output: int, device, learned_reward=True):
         super().__init__()
         self.dim_input = dim_input
@@ -31,7 +29,10 @@ class Model(nn.Module):
 
     @abc.abstractmethod
     def eval_score(
-        self, batch, log: Optional[bool] = False, **kwargs,
+        self,
+        batch,
+        log: Optional[bool] = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """Computes an evaluation score for the model over the given input/target."""
 
@@ -61,8 +62,8 @@ class Model(nn.Module):
 
     def save(self, save_dir: Union[str, pathlib.Path]):
         """Saves the model to the given directory."""
-        torch.save(self.state_dict(), pathlib.Path(save_dir) / self._MODEL_FNAME)
+        torch.save(self.state_dict(), pathlib.Path(save_dir) / "model.pt")
 
     def load(self, load_dir: Union[str, pathlib.Path]):
         """Loads the model from the given path."""
-        self.load_state_dict(torch.load(pathlib.Path(load_dir) / self._MODEL_FNAME))
+        self.load_state_dict(torch.load(pathlib.Path(load_dir) / "model.pt"))

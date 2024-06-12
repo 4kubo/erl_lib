@@ -46,7 +46,7 @@ class SVGAgent(SACAgent):
         **kwargs,
     ):
         if rollout_horizon <= 0:
-            kwargs["buffer_device"] = "cuda"
+            # kwargs["buffer_device"] = "cuda"
             rollout_freq = 0
         if kwargs["num_critic_iter"] is None:
             kwargs["num_critic_iter"] = int(kwargs["steps_per_iter"] / 4)
@@ -320,7 +320,7 @@ class SVGAgent(SACAgent):
         if self.weighted_critic:
             loss_critic *= self.critic_loss_weight
 
-        loss_critic = loss_critic.sum(2).mean()
+        loss_critic = loss_critic.mean((0, 1)).sum()
 
         # Collect learning metrics
         self._info[KEY_CRITIC_LOSS] = loss_critic.detach() / self.num_critic_ensemble
@@ -554,27 +554,6 @@ class SVGAgent(SACAgent):
 
         ctx_modules.actor_optimizer.step()
 
-    def pred_q_value(self, obs_action):
-        pred_q = self.critic(obs_action)
-        if self.scaled_critic:
-            pred_q = pred_q * self._q_width + self._q_center
-        return pred_q
-
-    def pred_target_q_value(self, obs_action):
-        target_q = self.critic_target(obs_action)
-        if self.scaled_critic:
-            target_q = target_q * self._q_width + self._q_center
-        target_q = self._reduce(target_q, "min")
-        if self.bounded_critic:
-            target_q = self._q_ub - torch.relu(self._q_ub - target_q)
-            target_q = self._q_lb + torch.relu(target_q - self._q_lb)
-        return target_q
-
-    def pred_terminal_q(self, obs_action):
-        pred_qs = self.pred_q_value(obs_action)
-        pred_qs = self._reduce(pred_qs, self.actor_reduction).t()
-        return pred_qs
-
     @contextmanager
     def policy_evaluation_context(self, detach=False, **kwargs):
         if 0 < self.rollout_horizon:
@@ -607,7 +586,14 @@ class SVGAgent(SACAgent):
     def save(self, dir_checkpoint):
         super().save(dir_checkpoint)
         self.dynamics_model.save(dir_checkpoint)
-        self.output_normalizer.save(dir_checkpoint)
+        if self.normalize_output:
+            self.output_normalizer.save(dir_checkpoint)
+
+    def load(self, dir_checkpoint):
+        super().load(dir_checkpoint)
+        self.dynamics_model.load(dir_checkpoint)
+        if self.normalize_output:
+            self.output_normalizer.load(dir_checkpoint)
 
     @property
     def num_critic_samples(self):

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from erl_lib.util.misc import weight_init
-from erl_lib.agent.module.layer import EnsembleLinearLayer
+from erl_lib.agent.module.layer import EnsembleLinearLayer, NormalizedEnsembleLinear
 
 
 class EnsembleCriticNetwork(nn.Module):
@@ -16,6 +16,8 @@ class EnsembleCriticNetwork(nn.Module):
         num_hidden,
         num_members,
         dim_output: int = 1,
+        dropout_rate: float = 0.0,
+        norm_eps: float = 0.0,
         **kwargs,
     ):
         super(EnsembleCriticNetwork, self).__init__()
@@ -27,18 +29,36 @@ class EnsembleCriticNetwork(nn.Module):
         self.info = {}
 
         layers = [
-            EnsembleLinearLayer(num_members, dim_obs + dim_act, dim_hidden),
-            nn.SiLU(),
+            NormalizedEnsembleLinear(
+                num_members,
+                dim_obs + dim_act,
+                dim_output=dim_hidden,
+                activation=nn.SiLU(inplace=True),
+                dropout_rate=dropout_rate,
+                normalize_eps=0.0,
+            )
         ]
         for i in range(num_hidden - 1):
-            layers.extend(
-                (
-                    EnsembleLinearLayer(num_members, dim_hidden, dim_hidden),
-                    nn.SiLU(),
+            layers.append(
+                NormalizedEnsembleLinear(
+                    num_members,
+                    dim_hidden,
+                    dim_output=dim_hidden,
+                    activation=nn.SiLU(inplace=True),
+                    dropout_rate=dropout_rate,
+                    normalize_eps=norm_eps,
                 )
             )
+        layers.append(
+            NormalizedEnsembleLinear(
+                num_members,
+                dim_hidden,
+                dim_output=dim_output,
+                # dropout_rate=dropout_rate,
+                normalize_eps=norm_eps,
+            )
+        )
 
-        layers.append(EnsembleLinearLayer(num_members, dim_hidden, dim_output))
         self.hidden_layers = nn.Sequential(*layers)
         # Weight init
         self.hidden_layers[-1].weight.data.fill_(0)

@@ -1,5 +1,5 @@
 defaults:
-  - /agent/sac@_here_
+  - /agent/sac_new@_here_
   - dynamics_model: deep_ensemble
   - model_train: deep_ensemble
 
@@ -18,7 +18,6 @@ critic_lr_ratio: 1.0
 num_critic_iter:
 bounded_critic: True
 scaled_critic: True
-weighted_critic: False
 # SVG specific
 update_after_episode: True
 retain_model_buffer_iter: 10

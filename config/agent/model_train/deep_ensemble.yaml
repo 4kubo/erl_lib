@@ -6,7 +6,7 @@ init:
   lr: 1e-3
   tau: 1.0
   grad_clip: 0.0
-  improvement_threshold: 0.05
+  improvement_threshold: 0.1
   keep_threshold: 0.5
   z_test_improvement: True
 poisson_weights: False

@@ -10,8 +10,6 @@ buffer_device: cuda
 batch_size: 256
 warm_start: False
 num_policy_opt_per_step: 1
-modality: state
-lr_loss_norm: 0.01
 # SAC's params
 discount: 0.0
 lr: 3e-4
@@ -31,7 +29,6 @@ scaled_critic: False
 weighted_critic: False
 # Actor
 actor_reduction: min
-actor_tau: 1.0
 # Alpha
 init_alpha: 1.0
 lr_alpha: ${agent.lr}
