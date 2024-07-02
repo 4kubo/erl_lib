@@ -17,7 +17,7 @@ class DmControlEnv(BaseEnv):
         domain_name,
         task_name,
         render_mode=None,
-        visualize_reward=True,
+        visualize_reward=False,
         height=128,
         width=128,
         camera_id=-1,
