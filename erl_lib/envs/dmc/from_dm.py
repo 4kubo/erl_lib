@@ -50,7 +50,9 @@ class DmControlEnv(BaseEnv):
         self.render_mode = render_mode
         self.height = height
         self.width = width
-        self.camera_id = self.DEFAULT_CAMERAS.get(domain_name, 0) if camera_id < 0 else camera_id
+        self.camera_id = (
+            self.DEFAULT_CAMERAS.get(domain_name, 0) if camera_id < 0 else camera_id
+        )
         self.metadata = {"render_fps": 1 / self.env.control_timestep()}
 
     def render(self, render_mode=None):
@@ -80,7 +82,9 @@ class DmControlEnv(BaseEnv):
         if self.render_mode == "human":
             self.render()
 
-        return obs, reward, terminated, truncated, {"_state": state.copy()}
+        info = self.env.task.info if hasattr(self.env.task, "info") else {}
+        info["_state"] = state.copy()
+        return obs, reward, terminated, truncated, info
 
     def reset(self, seed: int = None, **kwargs):
         self.env.task.random.seed(seed)
