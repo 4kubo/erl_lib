@@ -20,7 +20,6 @@ class DETrainer:
         self,
         model,
         lr: float = 1e-4,
-        tau: float = 0.0,
         grad_clip: float = 0.0,
         z_test_improvement: bool = False,
         improvement_threshold: float = 0.01,
@@ -31,7 +30,6 @@ class DETrainer:
         self.model = model
         self.num_members = model.num_members
         self.lr = lr
-        self.tau = tau
         self.dim_output = model.dim_output
         self._train_iteration = 0
         self.grad_clip = grad_clip
