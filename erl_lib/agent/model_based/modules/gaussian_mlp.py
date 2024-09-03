@@ -31,13 +31,14 @@ class GaussianMLP(Model):
         term_fn,
         input_normalizer,
         output_normalizer,
+        batch_size: int,
         normalize_input: bool = True,
-        normalize_io: bool = True,
+        normalize_po_input: bool = True,
+        normalize_delta: bool = True,
         *args,
         num_members: int = 1,
         dim_hidden: int = 200,
         noise_wd: float = 0.0,
-        # noise_lr: float = 1e-2,
         residual: bool = False,
         lb_std: float = 1e-3,
         drop_rate_base: float = 0.01,
@@ -45,24 +46,33 @@ class GaussianMLP(Model):
         weight_decay_ratios: Sequence[float] = None,
         # Prediction
         normalized_reward=False,
-        priors_on_function_values: bool = True,
+        delta_prediction: bool = True,
+        priors_on_function_values: bool = False,
         prediction_strategy: str = PS_TS1,
         # Training
         normalized_target: bool = True,
-        mse_score: bool = True,
+        mse_score: bool = False,
         **kwargs,
     ):
+        if (normalize_input or normalize_delta or normalized_target) and (
+            not normalize_input or not normalized_target
+        ):
+            raise NotImplementedError
+
         super().__init__(*args, **kwargs)
         self.term_fn = term_fn
         self.input_normalizer = input_normalizer
         self.output_normalizer = output_normalizer
+        self.batch_size = batch_size
         self.normalize_input = normalize_input
-        self.normalize_io = normalize_io
+        self.normalize_po_input = normalize_po_input
+        self.normalize_delta = normalize_delta and output_normalizer is not None
         self.num_members = num_members
         self.noise_wd = noise_wd
 
         self.weight_decay_base = weight_decay_base
         self.normalized_reward = normalized_reward
+        self.delta_prediction = delta_prediction
         self.priors_on_function_values = priors_on_function_values
         assert prediction_strategy in [PS_MM, PS_TS1, PS_INF]
         self.prediction_strategy = prediction_strategy
@@ -120,15 +130,20 @@ class GaussianMLP(Model):
         )
 
         self.layers = nn.Sequential(*hidden_layers)
-
+        index = np.arange(num_members).repeat(int(np.ceil(batch_size / num_members)))
+        index = torch.as_tensor(index)
+        self.base_index = (
+            torch.nn.functional.one_hot(index)
+            .T[..., None]
+            .repeat(1, 1, self.dim_output)
+            .to(device=self.device, dtype=torch.float32)
+        )  # [M, B, D]
         # Homo-scedastic noise
         self._log_noise = nn.Parameter(
             torch.zeros((num_members, 1, self.dim_output), dtype=torch.float32),
             requires_grad=True,
         )
         self.to(self.device)
-
-        self._old_log_noise = self._log_noise.detach().clone()
 
         self.lb_std = lb_std or 0
         self.lb_log_scale = (
@@ -137,13 +152,13 @@ class GaussianMLP(Model):
 
         self.eval()
 
-    def base_forward(self, x: torch.Tensor, normalize_io=None):
+    def base_forward(self, x: torch.Tensor, normalize_delta=None):
         """"""
         mus = self.layers(x)
-        if normalize_io is None:
-            normalize_io = self.normalize_io
+        if normalize_delta is None:
+            normalize_delta = self.normalize_delta
 
-        if normalize_io:
+        if normalize_delta:
             sample_mean, sample_std = (
                 self.output_normalizer.mean,
                 self.output_normalizer.std,
@@ -154,7 +169,7 @@ class GaussianMLP(Model):
             log_std_ale = self._log_noise
         return mus, log_std_ale
 
-    def moment_dist(self, x, normalize_io=None, log=False):
+    def moment_dist(self, x, normalize_delta=None, log=False):
         """Mu and sigma in Gaussian distribution's parameter."""
         mus = self.layers(x)
         log_var_ale = self._log_noise.mean(0) * 2
@@ -169,9 +184,9 @@ class GaussianMLP(Model):
             mu /= 1 + var_epi
             log_var_epi -= torch.log1p(var_epi)
 
-        if normalize_io is None:
-            normalize_io = self.normalize_io
-        if normalize_io:
+        if normalize_delta is None:
+            normalize_delta = self.normalize_delta
+        if normalize_delta:
             sample_mean, sample_std = (
                 self.output_normalizer.mean,
                 self.output_normalizer.std,
@@ -186,9 +201,7 @@ class GaussianMLP(Model):
         return mu, log_var_epi, log_var_ale
 
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
-        """"""
-        # assert x.ndim == 2
-        # assert not self.layers.training
+        """Propagate uncertainty forward with specified `prediction_strategy`."""
         prediction_strategy = prediction_strategy or self.prediction_strategy
         if prediction_strategy in (PS_TS1, PS_INF):
             batch_size = x.shape[0]
@@ -212,7 +225,7 @@ class GaussianMLP(Model):
             scale = log_std_ale.exp()
         elif prediction_strategy == PS_MM:
             mu, log_var_epi, log_var_ale = self.moment_dist(
-                x, normalize_io=False, **kwargs
+                x, normalize_delta=False, **kwargs
             )
             variance = log_var_ale.exp() + log_var_epi.exp()
             scale = variance.sqrt()
@@ -235,11 +248,8 @@ class GaussianMLP(Model):
         optimizer.zero_grad()
 
         # Predict
-        normalize_io = self.normalize_io and not self.normalized_target
-        mus, log_std_ale = self.base_forward(model_in, normalize_io=normalize_io)
-        # # Preprocess on target values
-        # target = target[None, ...].repeat(self.num_members, 1, 1)
-        # target += torch.randn_like(target) * self.lb_std
+        normalize_delta = self.normalize_delta and not self.normalized_target
+        mus, log_std_ale = self.base_forward(model_in, normalize_delta=normalize_delta)
         weight = weight.t()
         # Calculate loss
         loss = self.nll_loss(mus, log_std_ale, target, weight)
@@ -286,7 +296,7 @@ class GaussianMLP(Model):
         """Computes the squared error for the model over the given input/target."""
         model_in, target, weight = self.process_batch(batch)
         assert model_in.ndim == 2 and target.ndim == 2
-        normalize_io = self.normalize_io and not self.normalized_target
+        normalize_delta = self.normalize_delta and not self.normalized_target
         if self.mse_score:
             mus = self.layers(model_in)
             log_std_ale = self._log_noise.mean(0)
@@ -298,7 +308,7 @@ class GaussianMLP(Model):
             variance = var_epi + (2 * log_std_ale).exp()
         else:
             mu, log_var_epi, log_var_ale = self.moment_dist(
-                model_in, normalize_io=normalize_io
+                model_in, normalize_delta=normalize_delta
             )
             var_epi = log_var_epi.exp()
             variance = log_var_ale.exp() + var_epi
@@ -322,6 +332,13 @@ class GaussianMLP(Model):
                 info[f"{dim}_logstd_ale"] = logstd_ale_d
 
         return eval_score, error, variance, info
+
+    def rescale_error(self, error):
+        if self.normalize_delta is None and self.normalized_target:
+            error[:, 1:] *= self.input_normalizer.std.square()
+        elif self.normalize_delta and self.normalized_target:
+            error *= self.output_normalizer.std.square()
+        return error
 
     def decay_loss(self) -> torch.Tensor:
         decay_loss: torch.Tensor = 0.0  # type: ignore
@@ -352,8 +369,12 @@ class GaussianMLP(Model):
         model_in = torch.cat([obs_input, action], dim=1)
 
         # Target
-        target_obs = batch.next_obs - obs
-        if self.output_normalizer is None and self.normalized_target:
+        if self.delta_prediction:
+            target_obs = batch.next_obs - obs
+        else:
+            target_obs = batch.next_obs
+        # State-normalization
+        if not self.normalize_delta and self.normalized_target:
             input_scale = self.input_normalizer.std
             target_obs /= input_scale
 
@@ -367,8 +388,8 @@ class GaussianMLP(Model):
             target[..., 0] += (
                 torch.randn(target.shape[:2], device=self.device) * self.lb_std
             )
-
-        if self.normalize_io and self.normalized_target:
+        # Delta-normalization
+        if self.normalize_delta and self.normalized_target:
             target = self.output_normalizer.normalize(target)
         return model_in, target.clone(), batch.weight
 
@@ -385,11 +406,15 @@ class GaussianMLP(Model):
         Optional[Dict[str, float]],
     ]:
         """Samples next observations and rewards from the underlying 1-D model."""
-        model_in = torch.cat([obs, act], dim=obs.ndim - 1)
+        if not self.normalize_po_input and self.normalize_input:
+            obs_input = self.input_normalizer.normalize(obs)
+        else:
+            obs_input = obs
+        model_in = torch.cat([obs_input, act], dim=obs.ndim - 1)
         mu, scale = self.forward(model_in, log=log, **kwargs)
 
         epsilon = torch.randn_like(obs)
-        if self.output_normalizer:
+        if self.normalize_delta:
             mu[..., 1:] += scale[..., 1:] * epsilon
 
             if self.learned_reward:
@@ -404,20 +429,16 @@ class GaussianMLP(Model):
                 else:
                     mu = output_mu + mu * output_std
                 reward, obs_diff = torch.tensor_split(mu, [1], dim=-1)
-                obs_diff /= input_std
+                if self.normalize_po_input:
+                    obs_diff /= input_std
             else:
                 reward = False
                 obs_diff = self.output_normalizer.denormalize(mu)
             next_obs = obs + obs_diff
 
-            if self.term_fn:
-                # std = self.input_normalizer.std
-                obs_t = self.input_normalizer.denormalize(obs)
-                next_obs_t = self.input_normalizer.denormalize(next_obs)
-                terminated = self.term_fn(obs_t, act, next_obs_t)
-            else:
-                terminated = False
         else:
+            # TODO: For the case self.normalize_target but not self.normalize_po_input
+            assert self.normalize_po_input
             if self.learned_reward:
                 reward, obs_mu = torch.tensor_split(mu, [1], dim=-1)
                 obs_scale = scale[:, 1:]
@@ -426,11 +447,16 @@ class GaussianMLP(Model):
                 obs_scale = scale
                 reward = None
             next_obs = obs + obs_mu + epsilon * obs_scale
-            if self.term_fn:
-                terminated = self.term_fn(obs, act, next_obs)
-            else:
-                terminated = False
 
+        if self.term_fn:
+            obs_t = obs
+            next_obs_t = next_obs
+            if self.normalized_target and self.normalize_po_input:
+                obs_t = self.input_normalizer.denormalize(obs_t)
+                next_obs_t = self.input_normalizer.denormalize(next_obs_t)
+            terminated = self.term_fn(obs_t, act, next_obs_t)
+        else:
+            terminated = False
         if isinstance(terminated, bool):
             terminated = torch.full_like(reward, terminated, dtype=torch.bool)
 

@@ -7,6 +7,7 @@ _target_: erl_lib.agent.svg.SVGAgent
 term_fn: ???
 normalize_input: True
 normalize_output: True
+normalize_delta: True
 buffer_size: 1000000
 max_batch_size: 100000
 warm_start: True
@@ -19,8 +20,6 @@ num_critic_iter:
 bounded_critic: True
 scaled_critic: True
 # SVG specific
-update_after_episode: True
-retain_model_buffer_iter: 10
 rollout_horizon: 20
 rollout_freq: 20
 training_rollout_horizon: 5

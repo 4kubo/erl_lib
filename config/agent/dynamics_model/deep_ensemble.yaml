@@ -16,3 +16,4 @@ prediction_strategy: ts_1
 mse_score: False
 normalized_target: True
 residual: False
+uncertainty_bonus: False

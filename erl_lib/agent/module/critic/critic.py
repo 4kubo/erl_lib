@@ -54,7 +54,6 @@ class EnsembleCriticNetwork(nn.Module):
                 num_members,
                 dim_hidden,
                 dim_output=dim_output,
-                # dropout_rate=dropout_rate,
                 normalize_eps=norm_eps,
             )
         )

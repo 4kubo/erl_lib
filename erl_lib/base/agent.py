@@ -7,11 +7,7 @@ import torch.nn as nn
 
 
 from erl_lib.base import (
-    OBS,
-    ACTION,
-    REWARD,
-    NEXT_OBS,
-    MASK,
+    TIME_TOTAL,
     TIMESTEPS_TOTAL,
     EPOCH,
     EVAL,
@@ -75,6 +71,7 @@ class BaseAgent:
         }
         self._info = {}
         self._obs_stack = []
+        self.time_init = time.time()
 
     def reset(self):
         self._last_iter += self.iter
@@ -83,7 +80,6 @@ class BaseAgent:
         self.step = 0
         self.num_episodes_this_iter = 0
 
-        self.time_last_epoch = time.time()
         self._obs_stack = []
 
     def act(self, obs, sample=True, stack_obs=False):
@@ -135,10 +131,11 @@ class BaseAgent:
         self,
         envs,
         num_episodes_needed,
-        mean_training_return,
+        mean_training_return=None,
         stack_obs=False,
         callbacks=None,
     ):
+        """General function to evaluate the current policy with the target environments."""
         time_start = time.time()
         accum_dones = np.array([False] * num_episodes_needed)
 
@@ -148,7 +145,7 @@ class BaseAgent:
         seed = np.random.random_integers(int(1e5))
         envs.envs[0].step_id = 0
         envs.envs[0].episode_id = self.time_steps_total
-        obs, info = envs.reset(seed=int(seed))
+        obs, info = envs.reset()
         # Starts envs' steps
         while True:
             action = self.act(obs, sample=False, stack_obs=stack_obs)
@@ -194,6 +191,8 @@ class BaseAgent:
             for callback in callbacks:
                 callback(self, infos, returns)
 
+        time_total = time.time() - self.time_init
+        base_index = {TIME_TOTAL: time_total, TIMESTEPS_TOTAL: self.time_steps_total}
         # Return
         for i, return_i in returns.items():
             value_dict = {"return": return_i}
@@ -201,11 +200,11 @@ class BaseAgent:
                 if key.startswith("reward"):
                     value_dict[key] = value[i]
             self.logger.append(
-                EVAL,
-                index={TIMESTEPS_TOTAL: self.time_steps_total, "id": i},
-                value_dict=value_dict,
+                EVAL, index=dict(id=i, **base_index), value_dict=value_dict
             )
         # Other infos
+        if mean_training_return is None:
+            mean_training_return = sum(returns.values()) / num_episodes_needed
         infos = {
             key: np.mean(values)
             for key, values in infos.items()
@@ -216,33 +215,28 @@ class BaseAgent:
                 "time_eval": time.time() - time_start,
                 "mean_last_training_return": mean_training_return,
                 "num_samples_total": float(self.num_samples),
-                TIMESTEPS_TOTAL: float(self.time_steps_total),
                 "num_episodes_total": float(self.num_episodes),
                 "num_episodes_this_epoch": float(self.num_episodes_this_iter),
             }
         )
-        self.logger.append(
-            EPOCH, index={TIMESTEPS_TOTAL: self.time_steps_total}, value_dict=infos
-        )
+        self.logger.append(EPOCH, index=base_index, value_dict=infos)
         # Finalize logging at this epoch
         result = self.logger.end_epoch(self.time_steps_total)
 
         if self.silent:
             print_str = (
-                f"Steps: {self.time_steps_total: >10,d}, "
+                f"Steps: {self.time_steps_total: >9,d}, "
                 f"Episodes: {self.num_episodes: >6,d}, "
-                f"EvalReturn: {result[EVAL + '/return']:7.2f}"
+                f"EvalReturn: {result[EVAL + '/return']:9.2f}"
             )
             self.logger.info(print_str)
         else:
-            print_str = ""
-            for key, value in result.items():
-                print_str += f"{key}: {value:.3f}\n"
+            print_str = "\n".join(f"{k}: {v:.3f}" for k, v in result.items())
             self.logger.info(print_str)
 
         return result
 
-    def save(self, dir_checkpoint):
+    def save(self, dir_checkpoint, last=False):
         self.logger.info(f"Checkpointing to {dir_checkpoint}")
         state = {
             "last_iter": self._last_iter,
@@ -265,16 +259,10 @@ class BaseAgent:
         if self.total_iters < self.seed_iters:
             return False
         else:
-            # is_done = self.iters_per_epoch <= self.iter
             is_done = 0 < self.iter
             is_done &= self.total_iters == self.seed_iters or (
                 self.total_iters % self.iters_per_epoch == 0
             )
-            if is_done:
-                time_done = time.time()
-                time_epoch = time_done - self.time_last_epoch
-                self.time_last_epoch = time_done
-                self.logger.update({f"{EPOCH}/time_epoch": time_epoch})
             return is_done
 
     @property

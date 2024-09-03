@@ -7,5 +7,4 @@ init:
   grad_clip: 0.0
   improvement_threshold: 0.1
   keep_threshold: 0.5
-  z_test_improvement: True
 poisson_weights: False

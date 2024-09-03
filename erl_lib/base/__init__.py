@@ -15,6 +15,7 @@ GYM_KEY_EPISODE = "episode"
 GYM_KEY_RETURN = "r"
 
 # Logging
+TIME_TOTAL = "time_total"
 TIMESTEPS_TOTAL = "time_steps_total"
 EPISODES_TOTAL = "episodes_total"
 EPOCH = "epoch"

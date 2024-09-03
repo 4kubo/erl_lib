@@ -69,33 +69,18 @@ def flatten_dict(
 class Logger:
     """Class that implements a logger of statistics."""
 
-    def __init__(self, cfg, log_level=logging.INFO, max_bytes=1000000):
+    def __init__(self, cfg, max_bytes=1000000):
         self.log_dir = cfg.log.log_dir
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
         # Logger
         self.logger = logging.getLogger("erllib")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(getattr(logging, cfg.log.log_level, logging.INFO))
 
         fmt = logging.Formatter(
             "%(asctime)s [%(filename)s:%(lineno)d][%(levelname)s] %(message)s"
         )
-
-        # I don't why, but logs are printed out to stdout. even only with file handler
-        # sh = logging.StreamHandler()
-        # try:
-        #     sh.setLevel(log_level)
-        # except ValueError:
-        #     msg = (
-        #         f"got Unknown log level: '{log_level}'."
-        #         f" Please chose log_level via hydra out of"
-        #         f" ['INFO', 'DEBUG', 'WARN', 'ERROR']"
-        #     )
-        #     self.logger.error(msg)
-        #
-        # sh.setFormatter(fmt)
-        # self.logger.addHandler(sh)
 
         fh = RotatingFileHandler(
             os.path.join(self.log_dir, "logs.txt"), maxBytes=max_bytes, mode="w"
@@ -118,6 +103,7 @@ class Logger:
         if use_wandb:
             try:
                 import wandb
+
                 os.environ["WANDB_SILENT"] = "true"
 
                 group_name = cfg.log.wandb.get("group_name", "none")

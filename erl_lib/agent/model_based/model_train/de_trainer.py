@@ -21,7 +21,7 @@ class DETrainer:
         model,
         lr: float = 1e-4,
         grad_clip: float = 0.0,
-        z_test_improvement: bool = False,
+        z_test_improvement: bool = True,
         improvement_threshold: float = 0.01,
         keep_threshold: float = 0.5,
         logger=None,
@@ -132,23 +132,6 @@ class DETrainer:
                     )
 
                 if should_stop or (epoch == num_max_epochs - 1):
-                    # Detailed log if needed
-                    if self.detail_log:
-                        index = {
-                            "iteration": self._train_iteration,
-                            "env_step": env_step,
-                        }
-
-                        for epoch, train_loss in enumerate(train_loss_hist):
-                            index["epoch"] = epoch
-                            score_val = torch.mean(val_score_hist[epoch])
-                            info_detail = {
-                                "train_loss": train_loss,
-                                "score_val": score_val,
-                            }
-                            scope = "model_train_detail"
-                            self.logger.append(scope, index, info_detail)
-
                     break
 
         # saving the best models:
@@ -213,8 +196,8 @@ class DETrainer:
 
             if log:
                 errors = torch.vstack(errors_list)
+                errors = self.model.rescale_error(errors)
                 variances = torch.vstack(vars_list)
-                # assert errors.shape[0] == dataset.num_stored
                 # MSE
                 mse = errors.sum(1).mean()
                 info["mse"] = mse

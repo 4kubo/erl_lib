@@ -1,7 +1,7 @@
 defaults:
   - /agent/sac@_here_
 
-normalize_input: True
+normalize_po_input: True
 # Actor
 actor_reduction: mean
 # Critic

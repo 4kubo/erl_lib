@@ -87,7 +87,8 @@ class DmControlEnv(BaseEnv):
         return obs, reward, terminated, truncated, info
 
     def reset(self, seed: int = None, **kwargs):
-        self.env.task.random.seed(seed)
+        if seed is not None:
+            self.env.task.random.seed(seed)
         time_step = self.env.reset()
         state = self.env.physics.get_state()
         return self._get_observation(time_step), {"_state": state.copy()}

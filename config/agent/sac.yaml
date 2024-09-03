@@ -18,11 +18,10 @@ split_validation: False
 num_sample_weights: 0
 # Critic
 critic_tau: 0.005
-critic_subset_size: 2
 num_critic_iter: 1
 critic_lr_ratio: 1.0
 reward_q_th_lb: 0.01
-normalize_input: False
+normalize_po_input: False
 normalized_reward: False
 bounded_critic: False
 scaled_critic: False

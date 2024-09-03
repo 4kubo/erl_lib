@@ -60,6 +60,7 @@ class ReplayBuffer:
         self,
         capacity: int,
         device,
+        device_to: torch.device = "cuda",
         max_batch_size: int = None,
         valid_ratio: float = 0.2,
         split_validation: bool = False,
@@ -73,6 +74,7 @@ class ReplayBuffer:
         self.poisson_weights = poisson_weights
         self.dtype = torch.float32
         self.device = device
+        self.device_to = device_to
         self.valid_ratio = valid_ratio
         self.split_validation = split_validation
 
@@ -150,7 +152,9 @@ class ReplayBuffer:
 
     def _batch_from_indices(self, indices) -> TransitionBatch:
         selected_data = self._buffer[indices, : self.dim_data]
-        return TransitionBatch(selected_data, self.split_section_dict)
+        return TransitionBatch(
+            selected_data, self.split_section_dict, device=self.device_to
+        )
 
     def sample_label(self, num_sample=1):
         label = np.full((num_sample, 1), self.TRAIN)
@@ -211,7 +215,7 @@ class ReplayBuffer:
     @property
     def all_data(self):
         data = self._buffer[: self.num_stored, : self.dim_data]
-        return TransitionBatch(data, self.split_section_dict)
+        return TransitionBatch(data, self.split_section_dict, device=self.device_to)
 
     def __len__(self):
         return self.num_stored

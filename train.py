@@ -41,8 +41,9 @@ def run(cfg):
     set_seed_everywhere(cfg.common.seed)
     log_dir = cfg.log.log_dir
 
-    # Environments for behavior
+    env_seed, test_env_seed = np.random.randint(2**16, size=(2,))
     num_training_envs = cfg.common.num_training_envs
+    # Environments for behavior
     (
         envs,
         dim_obs,
@@ -51,20 +52,22 @@ def run(cfg):
         env_kwargs_train,
         action_repeat,
     ) = make_envs(cfg.env, num_training_envs)
+    envs.reset(seed=int(env_seed))
+    # Environments for test
+    num_test_envs = cfg.common.num_eval_episodes
+    test_env_seeds = np.random.randint(2**16, size=(num_test_envs,))
+    cfg.env.kwargs = dict(env_kwargs_train, **(cfg.env_eval.kwargs or {}))  # Overriding
+    dir_video = f"{log_dir}/videos" if cfg.log.record else None
+    envs_test, _, _, length_eval_iter, _, _ = make_envs(
+        cfg.env, num_test_envs, log_dir=dir_video
+    )
+    envs_test.reset(seed=int(test_env_seed))
     # Environment dependent parameters
     cfg.agent.steps_per_iter = cfg.agent.steps_per_iter or max_episode_steps
     cfg.agent.dim_obs = dim_obs
     cfg.agent.dim_act = dim_act
 
     logger = Logger(cfg)
-    # Environments for test
-    cfg.env.kwargs = dict(env_kwargs_train, **(cfg.env_eval.kwargs or {}))  # Overriding
-    dir_video = f"{log_dir}/videos" if cfg.log.record else None
-    envs_test, _, _, length_eval_iter, _, _ = make_envs(
-        cfg.env,
-        cfg.common.num_eval_episodes,
-        log_dir=dir_video,
-    )
 
     # Use same heuristics as the TD-MPC2 paper
     if cfg.agent.discount in (0, None):
@@ -100,6 +103,16 @@ def run(cfg):
     kwargs_outer_trange["disable"] |= disable_outer
     agent.kwargs_trange["disable"] |= np.logical_not(disable_outer)
 
+    # Initial evaluation
+    agent.reset()
+    agent.evaluate(
+        envs_test,
+        num_test_envs,
+        None,
+        stack_obs=cfg.common.eval.stack_obs,
+        callbacks=callbacks_if_need(cfg),
+    )
+
     # Main outer loop
     while agent.time_steps_total < cfg.common.max_time_steps:
         obs, info = envs.reset()
@@ -117,14 +130,11 @@ def run(cfg):
         pbar.close()
 
         # Performance of the behavior policy
-        num_eval_episodes = cfg.common.num_eval_episodes
-        mean_training_return = np.array(envs.env.return_queue)[
-            -num_eval_episodes:
-        ].mean()
+        mean_training_return = np.array(envs.env.return_queue)[-10:].mean()
         # Evaluate
         agent.evaluate(
             envs_test,
-            num_eval_episodes,
+            num_test_envs,
             mean_training_return,
             stack_obs=cfg.common.eval.stack_obs,
             callbacks=callbacks_if_need(cfg),
@@ -133,7 +143,8 @@ def run(cfg):
         if cfg.log.checkpoint and not cfg.log.only_last_checkpoint:
             dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"
             os.makedirs(dir_ckpt, exist_ok=True)
-            agent.save(dir_ckpt)
+            last = cfg.common.max_time_steps <= agent.time_steps_total
+            agent.save(dir_ckpt, last)
 
     if cfg.log.checkpoint and cfg.log.only_last_checkpoint:
         dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"

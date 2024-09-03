@@ -23,7 +23,7 @@ dependencies = [
     "torch<2.0.0",
     "mujoco<3.0.0",
     "tqdm",
-    "dm-control>=1.0.0",
+    "dm-control>=1.0.0,<1.0.14",
     "opencv-python",
     "gymnasium[mujoco,classic_control]>0.29",
     "gym==0.13",
