@@ -18,6 +18,7 @@ from erl_lib.base.datatype import (
 # Uncertainty propagation strategies
 PS_MM = "moment_matching"
 PS_TS1 = "ts_1"
+PS_TS1_F = "ts_1_full"
 PS_INF = "ts_infinity"
 
 
@@ -49,6 +50,7 @@ class GaussianMLP(Model):
         delta_prediction: bool = True,
         priors_on_function_values: bool = False,
         prediction_strategy: str = PS_TS1,
+        uncertainty_bonus: bool = True,
         # Training
         normalized_target: bool = True,
         mse_score: bool = False,
@@ -74,8 +76,9 @@ class GaussianMLP(Model):
         self.normalized_reward = normalized_reward
         self.delta_prediction = delta_prediction
         self.priors_on_function_values = priors_on_function_values
-        assert prediction_strategy in [PS_MM, PS_TS1, PS_INF]
+        assert prediction_strategy in [PS_MM, PS_TS1, PS_TS1_F, PS_INF]
         self.prediction_strategy = prediction_strategy
+        self.uncertainty_bonus = uncertainty_bonus
         # Model training
         self.normalized_target = normalized_target
         self.mse_score = mse_score
@@ -197,7 +200,8 @@ class GaussianMLP(Model):
             log_var_epi += sample_log_var
             log_var_ale += sample_log_var
 
-        # return mu, variance, var_epi, log_std_epi, log_std_ale
+        if self.uncertainty_bonus:
+            self.uncertainty(mus)
         return mu, log_var_epi, log_var_ale
 
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
@@ -223,6 +227,9 @@ class GaussianMLP(Model):
             )
 
             scale = log_std_ale.exp()
+        elif prediction_strategy == PS_TS1_F:
+            mu, scale = self.predict_ts1_full(x)
+
         elif prediction_strategy == PS_MM:
             mu, log_var_epi, log_var_ale = self.moment_dist(
                 x, normalize_delta=False, **kwargs
@@ -234,6 +241,41 @@ class GaussianMLP(Model):
             scale = self._log_noise.exp()
 
         return mu, scale
+
+    def predict_ts1_full(self, x, tile=None):
+        shuffle_index = torch.randperm(self.batch_size, device=self.device)
+        if tile:
+            shuffle_index = shuffle_index.tile(tile)
+        shuffle_mask = self.base_index[:, shuffle_index, :]
+        mus = self.layers(x)
+        mu = torch.sum(mus * shuffle_mask, 0)
+        log_std_ale = self._log_noise[shuffle_mask[..., 0].max(0).indices, ...].squeeze(
+            1
+        )
+        scale = log_std_ale.exp()
+        if self.uncertainty_bonus:
+            self.state_entropy = self.uncertainty(mus)
+        return mu, scale
+
+    def uncertainty(self, mus):
+        # Geometric Jensen Shannon entropy
+        vars = (self._log_noise * 2).exp()
+        var_c = vars[None, ...]
+        var_r = vars[:, None, ...]
+        var_mean = 2 * var_c * var_r / (var_c + var_r)
+
+        mu_c = mus[None, ...]
+        mu_r = mus[:, None, ...]
+        mu_mean = var_mean * (mu_c / var_c + mu_r / var_r) * 0.5
+
+        trace_term = (var_c + var_r) / var_mean * 0.5
+        log_term = var_mean.log() - 0.5 * (var_c.log() + var_r.log())
+        error_term = (
+            0.5 * ((mu_mean - mu_c).square() + (mu_mean - mu_r).square()) / var_mean
+        )
+        gjs = torch.mean(trace_term + log_term + error_term - 1, dim=-1) * 0.5
+        gjs = gjs.sum((0, 1)) / (self.num_members * (self.num_members - 1)) * 0.25
+        return gjs
 
     def update(
         self,

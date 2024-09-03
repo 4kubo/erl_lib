@@ -27,6 +27,11 @@ mve_horizon: 1
 learned_reward: True
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
+# Uncertainty-Aware Rollout Adaptation
+uara: False
+zeta_quantile: 0.95
+uara_xi: 2.0
+lr_kappa: 0.0003
 # Common
 iters_per_epoch: 10
 steps_per_iter:

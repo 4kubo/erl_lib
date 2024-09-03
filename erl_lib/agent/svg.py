@@ -47,10 +47,10 @@ class SVGAgent(SACAgent):
         normalize_output: bool = True,
         normalize_delta: bool = True,
         update_after_episode: bool = True,
-        # uara=True,
-        # zeta_quantile=0.95,
-        # uara_xi=10.0,
-        # lr_kappa: float = 0.01,
+        uara=True,
+        zeta_quantile=0.95,
+        uara_xi=10.0,
+        lr_kappa: float = 0.01,
         **kwargs,
     ):
         if rollout_horizon <= 0:
@@ -141,6 +141,17 @@ class SVGAgent(SACAgent):
                 dim=0,
             ).to(self.device)
             self.discount_mat = torch.triu(self.discount**discount_exps)
+        # Adaptive rollout length
+        # c.f. Frauenknecht, Bernd, et al. "Trust the Model Where It Trusts Itself
+        # --Model-Based Actor-Critic with Uncertainty-Aware Rollout Adaption."
+        # arXiv preprint arXiv:2405.19014 (2024).
+        self.uara = uara
+        self.uara_xi = uara_xi
+        self.lr_kappa = lr_kappa
+        self.kappa = None
+        if uara:
+            self.round_rollout = 1
+            self.zeta_quantile = torch.tensor(zeta_quantile, device=self.device)
 
     def build_critics(self, critic_cfg):
         super().build_critics(critic_cfg)
@@ -237,7 +248,14 @@ class SVGAgent(SACAgent):
 
                 action = self.sample_action(ctx_modules.actor, obs)[0]
 
-                rollouts = self.rollout(ctx_modules, obs, action, self.rollout_horizon)
+                prediction_strategy = PS_TS1_F if self.uara else None
+                rollouts = self.rollout(
+                    ctx_modules,
+                    obs,
+                    action,
+                    self.rollout_horizon,
+                    prediction_strategy=prediction_strategy,
+                )
                 obss = rollouts[0]
                 masks = rollouts[4]
                 batch_obs = torch.cat(
@@ -247,6 +265,11 @@ class SVGAgent(SACAgent):
                 num_sampled += batch_obs.shape[0]
 
             if num_rollout_samples <= num_sampled:
+                if self.uara:
+                    self._info["uara_kappa"] = self.kappa
+                    self._info["mean_rollout_length"] = (
+                        torch.stack(rollouts[4]).sum(0).float().mean()
+                    )
                 break
 
     def sample_action(self, actor, obs, log=False, **kwargs):
@@ -608,20 +631,45 @@ class SVGAgent(SACAgent):
         finally:
             pass
 
-    def model_step_context(self, action, model_state, **kwargs):
-        return self.dynamics_model.sample(action, model_state, **kwargs)
+    def model_step_context(
+        self, action, model_state, step=0, prediction_strategy=None, **kwargs
+    ):
+        next_obs, reward, done, info = self.dynamics_model.sample(
+            action, model_state, prediction_strategy=prediction_strategy, **kwargs
+        )
+        with torch.no_grad():
+            if self.uara and prediction_strategy == PS_TS1_F:
+                uncertainty = self.dynamics_model.state_entropy
+                if step == 0:
+                    base_uncertainty = torch.quantile(uncertainty, self.zeta_quantile)
+                    if self.kappa is None:
+                        assert self.round_rollout == 1
+                        self.kappa = base_uncertainty
+                    else:
+                        # self.kappa = (
+                        #     base_uncertainty + self.round_rollout * self.kappa
+                        # ) / (self.round_rollout + 1)
+                        # self.round_rollout += 1
+                        self.kappa.lerp_(base_uncertainty, self.lr_kappa)
+                done |= (self.kappa * self.uara_xi < uncertainty)[:, None]
+        return next_obs, reward, done, info
 
     def save(self, dir_checkpoint, last=False):
         super().save(dir_checkpoint, last)
         self.dynamics_model.save(dir_checkpoint)
         if self.normalize_output:
             self.output_normalizer.save(dir_checkpoint)
+        if self.uara:
+            torch.save({"kappa": self.kappa}, f"{dir_checkpoint}/svg.pt")
 
     def load(self, dir_checkpoint):
         super().load(dir_checkpoint)
         self.dynamics_model.load(dir_checkpoint)
         if self.normalize_output:
             self.output_normalizer.load(dir_checkpoint)
+        if self.uara:
+            modules = torch.load(f"{dir_checkpoint}/svg.pt")
+            self.kappa = modules["kappa"]
 
     @property
     def num_critic_samples(self):
