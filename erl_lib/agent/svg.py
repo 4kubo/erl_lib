@@ -46,6 +46,7 @@ class SVGAgent(SACAgent):
         normalize_input: bool = True,
         normalize_output: bool = True,
         normalize_delta: bool = True,
+        denormalize_scale: float = 1.0,
         update_after_episode: bool = True,
         uara=True,
         zeta_quantile=0.95,
@@ -69,7 +70,10 @@ class SVGAgent(SACAgent):
         )
         if self.normalize_output:
             self.output_normalizer = Normalizer(
-                self.dim_obs + 1, self.device, "output_normalizer"
+                self.dim_obs + 1,
+                self.device,
+                scale=denormalize_scale,
+                name="output_normalizer",
             )
         else:
             self.output_normalizer = None

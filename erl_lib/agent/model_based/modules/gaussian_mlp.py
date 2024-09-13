@@ -42,6 +42,7 @@ class GaussianMLP(Model):
         noise_wd: float = 0.0,
         residual: bool = False,
         lb_std: float = 1e-3,
+        layer_norm: float = 1.0,
         drop_rate_base: float = 0.01,
         weight_decay_base: float = 0.001,
         weight_decay_ratios: Sequence[float] = None,
@@ -60,6 +61,7 @@ class GaussianMLP(Model):
             not normalize_input or not normalized_target
         ):
             raise NotImplementedError
+        assert 0 <= layer_norm
 
         super().__init__(*args, **kwargs)
         self.term_fn = term_fn
@@ -103,7 +105,7 @@ class GaussianMLP(Model):
         for i, wd_ratio_i in enumerate(weight_decay_ratios[1:-1]):
             wd_i = wd_ratio_i * weight_decay_base
             dr_i = (max_ratio - wd_ratio_i) * drop_rate_base
-            eps_i = min(max(np.power(10.0, -i), 1e-5), 1.0)
+            eps_i = min(max(np.power(10.0, -i), 1e-5), 1.0) * layer_norm
             hidden_layers.append(
                 NormalizedEnsembleLinear(
                     num_members,
@@ -120,7 +122,7 @@ class GaussianMLP(Model):
         wd_last = ratio_last * weight_decay_base
         dr_last = (max_ratio - ratio_last) * drop_rate_base
 
-        eps_last = min(max(np.power(10.0, -(depth - 2)), 1e-5), 1.0)
+        eps_last = min(max(np.power(10.0, -(depth - 2)), 1e-5), 1.0) * layer_norm
         hidden_layers.append(
             NormalizedEnsembleLinear(
                 num_members,

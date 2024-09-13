@@ -8,6 +8,7 @@ term_fn: ???
 normalize_input: True
 normalize_output: True
 normalize_delta: True
+denormalize_scale: 1.0
 buffer_size: 1000000
 max_batch_size: 100000
 warm_start: True

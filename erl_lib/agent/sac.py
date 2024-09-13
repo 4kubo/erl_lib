@@ -129,7 +129,9 @@ class SACAgent(BaseAgent):
 
         self.normalize_po_input = normalize_po_input
         self.input_normalizer = Normalizer(
-            self.dim_obs, self.device, "input_normalizer"
+            self.dim_obs,
+            self.device,
+            name="input_normalizer",
         )
 
         self.num_updated = 0

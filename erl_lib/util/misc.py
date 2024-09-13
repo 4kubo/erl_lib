@@ -313,12 +313,15 @@ class TransitionIterator:
 class Normalizer:
     """Class that keeps a running mean and variance and normalizes data accordingly."""
 
-    def __init__(self, size: int, device: torch.device, name="normalizer"):
+    def __init__(
+        self, size: int, device: torch.device, scale: float = 1.0, name="normalizer"
+    ):
         self.size = size
         self.mean_np = np.zeros((1, size), dtype=np.float32)
         self.var_np = np.ones((1, size), dtype=np.float32)
         self.mean = torch.as_tensor(self.mean_np, device=device)
         self.std = torch.as_tensor(self.var_np, device=device)
+        self.scale = scale
         self.eps = 1e-4
         self.device = device
         self.name = name
@@ -346,9 +349,11 @@ class Normalizer:
             self.num_old += num_new
 
     def to(self):
-        std_np = np.sqrt(self.var_np.clip(min=self.eps**2))
-        self.mean.data.copy_(torch.from_numpy(self.mean_np))
-        self.std.data.copy_(torch.from_numpy(std_np))
+        std_np = np.sqrt(self.var_np.clip(min=self.eps**2)) * self.scale
+        self.mean.copy_(
+            torch.as_tensor(self.mean_np, device=self.device, dtype=torch.float32)
+        )
+        self.std.copy_(torch.as_tensor(std_np, device=self.device, dtype=torch.float32))
 
     def normalize(self, val) -> torch.Tensor:
         """Normalizes the value according to the stored statistics."""
