@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn as nn
 
+from torch.nn import SmoothL1Loss as Huber
+
 from erl_lib.agent.model_based.modules.model import Model
 from erl_lib.agent.module.layer import (
     NormalizedEnsembleLinear,
@@ -17,6 +19,7 @@ from erl_lib.base.datatype import (
 
 # Uncertainty propagation strategies
 PS_MM = "moment_matching"
+PS_MMD = "moment_matching_direct"
 PS_TS1 = "ts_1"
 PS_TS1_F = "ts_1_full"
 PS_INF = "ts_infinity"
@@ -55,6 +58,7 @@ class GaussianMLP(Model):
         # Training
         normalized_target: bool = True,
         mse_score: bool = False,
+        training_loss_fn: str = "nll", # nll or gauss_adapt
         **kwargs,
     ):
         if (normalize_input or normalize_delta or normalized_target) and (
@@ -78,12 +82,14 @@ class GaussianMLP(Model):
         self.normalized_reward = normalized_reward
         self.delta_prediction = delta_prediction
         self.priors_on_function_values = priors_on_function_values
-        assert prediction_strategy in [PS_MM, PS_TS1, PS_TS1_F, PS_INF]
+        assert prediction_strategy in [PS_MM, PS_TS1, PS_TS1_F, PS_INF, PS_MMD]
         self.prediction_strategy = prediction_strategy
         self.uncertainty_bonus = uncertainty_bonus
         # Model training
         self.normalized_target = normalized_target
         self.mse_score = mse_score
+
+        self.training_loss_fn = training_loss_fn
 
         depth = len(weight_decay_ratios)
         max_ratio = max(weight_decay_ratios)
@@ -209,6 +215,7 @@ class GaussianMLP(Model):
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
         """Propagate uncertainty forward with specified `prediction_strategy`."""
         prediction_strategy = prediction_strategy or self.prediction_strategy
+        
         if prediction_strategy in (PS_TS1, PS_INF):
             batch_size = x.shape[0]
             num_samples_per_member = batch_size // self.num_members
@@ -231,6 +238,9 @@ class GaussianMLP(Model):
             scale = log_std_ale.exp()
         elif prediction_strategy == PS_TS1_F:
             mu, scale = self.predict_ts1_full(x)
+
+        elif prediction_strategy == PS_MMD:
+            mu, scale = self.predict_mm_direct(x)
 
         elif prediction_strategy == PS_MM:
             mu, log_var_epi, log_var_ale = self.moment_dist(
@@ -257,6 +267,28 @@ class GaussianMLP(Model):
         scale = log_std_ale.exp()
         if self.uncertainty_bonus:
             self.state_entropy = self.uncertainty(mus)
+        return mu, scale
+
+    def predict_mm_direct(self, x, tile=None):
+        gauss_noise = torch.randn((self.num_members, x.shape[0], 1), device=self.device)
+        #breakpoint()
+        mus = self.layers(x)
+        #mu = torch.sum(mus * shuffle_mask, 0)
+
+        mean = mus.mean(0, keepdims=True)
+
+        mu = 1 / np.sqrt(self.num_members) * ((mus - mean) * gauss_noise).sum(axis=0) + mean.squeeze(0)
+
+        #log_std_ale = self._log_noise[shuffle_mask[..., 0].max(0).indices, ...].squeeze(
+        #    1
+        #)
+        #breakpoint()
+        log_std_ale = self._log_noise.mean(0)
+
+        scale = log_std_ale.exp()
+        if self.uncertainty_bonus:
+            self.state_entropy = self.uncertainty(mus)
+        #breakpoint()
         return mu, scale
 
     def uncertainty(self, mus):
@@ -296,7 +328,10 @@ class GaussianMLP(Model):
         mus, log_std_ale = self.base_forward(model_in, normalize_delta=normalize_delta)
         weight = weight.t()
         # Calculate loss
-        loss = self.nll_loss(mus, log_std_ale, target, weight)
+        if self.training_loss_fn == "nll": # Temporary solution for switching between loss functions
+            loss = self.nll_loss(mus, log_std_ale, target, weight)
+        elif self.training_loss_fn == "gauss_adapt":
+            loss = self.gauss_adapt_loss(mus, log_std_ale, target, weight)
 
         loss.backward()
         if grad_clip:
@@ -333,6 +368,47 @@ class GaussianMLP(Model):
         nll = torch.mean(nll * weight, dim=-1)  # average over batch
 
         loss = nll.sum()  # sum over ensemble dimension
+        return loss
+
+    def gauss_adapt_loss( #self, y_pred, y, y_std, eps=1e-12):
+        self,
+        pred_mus: torch.Tensor,
+        pred_log_noise: torch.Tensor,
+        target: torch.Tensor,
+        weight: torch.Tensor = 1.0,
+        log=False
+    ) -> torch.Tensor:
+        """Negative log-likelihood on mini-batch.
+
+        B: Batch size
+        D: Dimension of input data
+        E: Ensemble size
+        model_in: [(E,) B, D]
+        target: [(E,) B, D]
+        weight: [E, B] if ensemble
+        """
+
+        l2_mean_loss = F.mse_loss(pred_mus, target, reduction="none")
+
+        if self.lb_std:
+            pred_logstd = pred_log_noise.clamp_min(self.lb_log_scale)
+        else:
+            pred_logstd = pred_log_noise
+
+        mean_log = l2_mean_loss.detach().mean(dim=[0,1], keepdims=True).log()
+        mean_log = mean_log.expand(pred_logstd.shape[0],
+                                   mean_log.shape[1],
+                                   mean_log.shape[2])
+        pred_logvar = 2 * pred_logstd
+        var_loss = F.mse_loss(pred_logvar, mean_log, reduction="none")
+
+        l2_mean_loss = l2_mean_loss.sum(dim=2)
+        l2_mean_loss = l2_mean_loss.mean(dim=1)
+        var_loss = var_loss.sum(dim=2)
+        var_loss = var_loss.mean(dim=1)
+
+        loss = l2_mean_loss.sum() + var_loss.sum()
+
         return loss
 
     @torch.no_grad()
@@ -522,3 +598,8 @@ class GaussianMLP(Model):
 
         params.append({"params": self._log_noise, "weight_decay": self.noise_wd})
         return params
+
+    def print_noise(self):
+        noises = self._log_noise.detach().exp().cpu().numpy()
+        print("The model noise levels are: ", noises.T)
+        return noises.T

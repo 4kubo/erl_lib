@@ -10,11 +10,13 @@ from erl_lib.agent.model_based.modules.gaussian_mlp import GaussianMLP, PS_MM
 from erl_lib.agent.model_based.model_train.de_trainer import DETrainer
 
 
-plt.rcParams["axes.linewidth"] = 0.5  # axis line width
-plt.rcParams["axes.grid"] = True  # make grid
+#plt.rcParams["axes.linewidth"] = 0.5  # axis line width
+#plt.rcParams["axes.grid"] = True  # make grid
+
 # plt.rcParams["text.usetex"] = True
 # plt.rcParams["font.family"] = ["Latin Modern Roman"]
-plt.grid(True)
+
+#plt.grid(True)
 
 
 # Model
@@ -108,6 +110,8 @@ def generate_data(
     seed: int = 0,
     x_scale=1.0,
     y_scale=1.0,
+    obs_noise1=0.05,
+    obs_noise2=0.05,
     **kwargs,
 ):
     np.random.seed(seed)
@@ -125,8 +129,8 @@ def generate_data(
     kwargs = dict(
         num_samples=num_samples,
         n=dim_input,
-        obs_noise1=0.05,
-        obs_noise2=0.05,
+        obs_noise1=obs_noise1,
+        obs_noise2=obs_noise2,
         **dict(x_kwargs, **kwargs),
     )
     x_train, y_train, x_test, y_test = gen_simple_sins(
@@ -390,6 +394,7 @@ def train(
     max_epoch=10000,
     seed=0,
     output_scale=1.0,
+    train_loss_fn="nll", # nll or gauss_adapt
 ):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -416,6 +421,8 @@ def train(
         noise_wd=0.01,
         learned_reward=False,
         delta_prediction=False,
+        lb_std=1e-3 / output_scale,
+        training_loss_fn=train_loss_fn, # nll or gauss_adapt
     )
 
     model_trainer = DETrainer(
@@ -454,7 +461,25 @@ def train(
     mus, mu, scale = pred_ensemble(x_test, model, device)
     train_losses = torch.as_tensor(train_losses).cpu().numpy()
     eval_scores = torch.tensor(eval_scores).cpu().numpy()[1:]
-    return (mus_init, mu_init, scale_init), (mus, mu, scale), train_losses, eval_scores
+    noises = model.print_noise()
+    print("Unnormalized noise: ", noises * output_normalizer.std.detach().cpu().numpy())
+    
+    return model, mus_init, mu_init, scale_init, mus, mu, scale, train_losses, eval_scores
+
+
+def compute_rmse_loss(model, data, device):
+    model.eval()
+    with torch.no_grad():
+        x = data.obs.cpu().numpy()
+        y = data.next_obs.cpu().numpy()
+
+        mus, mu, _ = pred_ensemble(x, model, device)
+
+        loss_mean = ((mu - y) ** 2).sum(axis=1).mean()
+        loss_mean = np.sqrt(loss_mean)
+        loss_individual = np.sqrt(((mus - y.reshape(1, *y.shape)) ** 2).sum(axis=2).mean())
+    
+    return loss_mean, loss_individual
 
 
 def train_each_scale(
@@ -469,6 +494,8 @@ def train_each_scale(
     keep_threshold=0.5,
     improvement_threshold=0.1,
     batch_size_train=8,
+    noise_std=0.05,
+    train_loss_fn="nll", # nll or gauss_adapt
 ):
     min_epoch = max_epoch
     num_members = 8
@@ -499,6 +526,7 @@ def train_each_scale(
                 print(f"Created dir: {path_out_s}")
             else:
                 path_out_s = None
+            
             # Data
             (
                 data_train,
@@ -519,9 +547,14 @@ def train_each_scale(
                 x_scale=x_scale,
                 y_scale=y_scale,
                 scaled=False,
+                obs_noise1=noise_std,
+                obs_noise2=noise_std,
             )
+
             # Train with normalization
-            result = train(
+            #result
+            
+            model, mus_init, mu_init, scale_init, mus, mu, scale, train_losses, eval_scores = train(
                 data_train,
                 data_val,
                 x_test,
@@ -539,9 +572,21 @@ def train_each_scale(
                 improvement_threshold=improvement_threshold,
                 min_epoch=min_epoch,
                 max_epoch=max_epoch,
-            )[1]
+                train_loss_fn=train_loss_fn,
+            )# (mus_init, mu_init, scale_init), (mus, mu, scale), train_losses, eval_scores
+
+            # Compute RMSE loss
+            loss_train_mean, loss_train_individual = compute_rmse_loss(model, data_train, device)
+            loss_val_mean, loss_val_individual = compute_rmse_loss(model, data_val, device)
+            print(f"Train RMSE loss: {loss_train_mean}")
+            print(f"Train individual RMSE loss: {loss_train_individual}")
+            print(f"Validation RMSE loss: {loss_val_mean}")
+            print(f"Validation individual RMSE loss: {loss_val_individual}")
+
             plot_ensemble(
-                *result,
+                mus,
+                mu, 
+                scale, 
                 x_train,
                 y_train,
                 x_test,
@@ -602,6 +647,19 @@ if __name__ == "__main__":
         default=0.1,
         help="The improvement threshold used for early stopping in model training.",
     )
+    arg_parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.05,
+        help="The standard deviation of noise added to the data.",
+    )
+    arg_parser.add_argument( # with choice selection
+        "--train-loss-fn",
+        type=str,
+        default="gauss_adapt",
+        help="The loss function used for training the model.",
+        choices=["nll", "gauss_adapt"],
+    )
 
     args = arg_parser.parse_args()
 
@@ -617,4 +675,6 @@ if __name__ == "__main__":
         improvement_threshold=args.improvement_threshold,
         path_out=args.path_out,
         seed=args.seed,
+        noise_std=args.noise_std,
+        train_loss_fn=args.train_loss_fn,
     )
