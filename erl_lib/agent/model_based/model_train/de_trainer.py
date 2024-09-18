@@ -62,7 +62,9 @@ class DETrainer:
     ):
         """Trains the model for some number of epochs."""
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
-        best_val_score, _ = self.evaluate(dataset_eval)
+        best_val_score, info_eval = self.evaluate(
+            dataset_eval, log=self.denormalized_mse
+        )
 
         if 1 <= self.keep_threshold:
             keep_epochs = num_max_epochs
@@ -106,12 +108,17 @@ class DETrainer:
                 # Evaluate model
                 t_2 = time.time()
 
-                scores_val, _ = self.evaluate(dataset_eval)
+                scores_val, info_eval = self.evaluate(
+                    dataset_eval, log=self.denormalized_mse
+                )
 
                 with torch.no_grad():
                     train_loss = torch.hstack(batch_losses).mean() / self.num_members
                 train_loss_hist.append(train_loss)
-                val_score_hist.append(scores_val.mean())
+                if self.denormalized_mse:
+                    val_score_hist.append(info_eval["eval/rmse"])
+                else:
+                    val_score_hist.append(scores_val.mean())
 
                 time_train += t_2 - t_1
                 time_eval += time.time() - t_2
