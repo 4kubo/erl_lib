@@ -1,17 +1,12 @@
 import argparse
 from pathlib import Path
-import matplotlib.pyplot as plt
-import gymnasium
 import numpy as np
 import torch
-from collections import OrderedDict
 from omegaconf import OmegaConf
 
-from erl_lib.util.logger import Logger
 from erl_lib.util.env import make_envs
-from erl_lib.util.misc import ReplayBuffer, Normalizer, TransitionIterator
-from erl_lib.agent.model_based.modules.gaussian_mlp import GaussianMLP, PS_MM
-from erl_lib.agent.model_based.model_train.de_trainer import DETrainer
+from erl_lib.util.misc import ReplayBuffer, Normalizer
+from erl_lib.agent.model_based.modules.gaussian_mlp import PS_MM
 from erl_lib.base import (
     OBS,
     ACTION,
@@ -20,14 +15,7 @@ from erl_lib.base import (
     NEXT_OBS,
     WEIGHT,
 )
-from diagnostics.utils import train, plot_learning_curve
-
-
-plt.rcParams["axes.linewidth"] = 0.5  # axis line width
-plt.rcParams["axes.grid"] = True  # make grid
-# plt.rcParams["text.usetex"] = True
-# plt.rcParams["font.family"] = ["Latin Modern Roman"]
-plt.grid(True)
+from diagnostics.utils import train
 
 
 # Model
@@ -35,9 +23,6 @@ weight_decay_ratios = [0.25, 0.5, 0.75, 1.0]
 # Training
 silent = False
 device = "cuda"
-
-
-task2splits = {"MBWalker2d": {OBS: 17}}
 
 
 def train_each_scale(
@@ -59,8 +44,6 @@ def train_each_scale(
     batch_size=500_000,
     mini_batch_size=2048,
 ):
-    "mnt/peta/data/results/soft_mbrl/deep_vie/erllib/benchmark/esvg/20240806_FROM-KSC_gym-model-accuracy-check/results/MBHumanoid-v0/2TASKMBHumanoid-v0PLATgymSTEP5e5NORM_OUTTrue-seed0/checkpoint/0000500000"
-
     path_data = Path(path_data)
     cfg = OmegaConf.load(f"{path_data}/.hydra/config.yaml")
     if cfg.agent.dynamics_model.num_members != num_members:
