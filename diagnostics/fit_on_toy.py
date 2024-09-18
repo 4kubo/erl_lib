@@ -7,7 +7,7 @@ from collections import OrderedDict
 
 from erl_lib.util.misc import ReplayBuffer, Normalizer, TransitionIterator
 from erl_lib.agent.model_based.modules.gaussian_mlp import GaussianMLP, PS_MM
-from erl_lib.agent.model_based.model_train.de_trainer import DETrainer
+from diagnostics.utils import train
 
 
 plt.rcParams["axes.linewidth"] = 0.5  # axis line width
@@ -22,16 +22,6 @@ weight_decay_ratios = [0.25, 0.5, 1.0]
 # Training
 silent = False
 device = "cuda"
-
-
-class FakeLogger:
-    log_level = 20
-
-    def update(self, *args, **kwargs):
-        pass
-
-    def append(self, scope, index, info):
-        self.info = info
 
 
 # %% Data generation
@@ -238,7 +228,17 @@ def pred_ensemble(x_test, model, device):
 
 # %%
 def plot_ensemble(
-    mus, mu, scale, x_train, y_train, x_test, y_test, x_val, y_val, path_out=None
+    mus,
+    mu,
+    scale,
+    x_train,
+    y_train,
+    x_test,
+    y_test,
+    x_val,
+    y_val,
+    path_out=None,
+    file_name=None,
 ):
     num_members = mus.shape[0]
     dim_output = y_test.shape[1]
@@ -304,7 +304,10 @@ def plot_ensemble(
     legend(fig, adjust=1)
 
     if path_out is not None:
-        fig.savefig(path_out / "prediction.pdf")
+        if file_name is None:
+            fig.savefig(path_out / "prediction.pdf")
+        else:
+            fig.savefig(path_out / file_name)
     plt.show()
 
 
@@ -372,96 +375,16 @@ def legend(fig, adjust=False):
 
 
 # %%
-def train(
-    data_train,
-    data_val,
-    x_test,
-    dim_input,
-    dim_output,
-    num_members,
-    dropout_rate,
-    layer_norm,
-    lr,
-    batch_size_train,
-    normalize_input=True,
-    keep_threshold=0.5,
-    improvement_threshold=0.1,
-    min_epoch=1000,
-    max_epoch=10000,
-    seed=0,
-    output_scale=1.0,
-):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    input_normalizer = Normalizer(dim_input, device, name="input_normalizer")
-    output_normalizer = Normalizer(
-        dim_output, device, scale=output_scale, name="output_normalizer"
-    )
-
-    model = GaussianMLP(
-        term_fn=None,
-        input_normalizer=input_normalizer,
-        output_normalizer=output_normalizer,
-        normalize_input=normalize_input,
-        batch_size=256,
-        dim_input=dim_input,
-        dim_output=dim_output,
-        device=device,
-        num_members=num_members,
-        dim_hidden=256,
-        drop_rate_base=dropout_rate,
-        layer_norm=layer_norm,
-        weight_decay_ratios=weight_decay_ratios,
-        noise_wd=0.01,
-        learned_reward=False,
-        delta_prediction=False,
-    )
-
-    model_trainer = DETrainer(
-        model,
-        lr=lr,
-        keep_threshold=keep_threshold,
-        improvement_threshold=improvement_threshold,
-        silent=silent,
-        logger=FakeLogger(),
-    )
-    # Preprocess for model training
-    target = data_train.next_obs
-
-    input_normalizer.update_stats(data_train.obs.cpu().numpy())
-    input_normalizer.to()
-    output_normalizer.update_stats(target.cpu().numpy())
-    output_normalizer.to()
-
-    iterator_train = TransitionIterator(
-        data_train, batch_size_train, shuffle_each_epoch=True, device=device
-    )
-    iterator_val = TransitionIterator(
-        data_val, 256, shuffle_each_epoch=False, device=device
-    )
-
-    mus_init, mu_init, scale_init = pred_ensemble(x_test, model, device)
-    # Train the model
-    train_losses, eval_scores = model_trainer.train(
-        iterator_train,
-        iterator_val,
-        0,
-        keep_epochs=min_epoch,
-        num_max_epochs=max_epoch,
-    )
-    # Make prediction
-    mus, mu, scale = pred_ensemble(x_test, model, device)
-    train_losses = torch.as_tensor(train_losses).cpu().numpy()
-    eval_scores = torch.tensor(eval_scores).cpu().numpy()[1:]
-    return (mus_init, mu_init, scale_init), (mus, mu, scale), train_losses, eval_scores
 
 
 def train_each_scale(
     path_out=None,
+    file_name=None,
     seed=0,
     max_epoch=10000,
     train_size=20,
+    num_members=8,
+    pfv=False,
     dropout_rate=0.01,
     layer_norm=1.0,
     output_scale=1.0,
@@ -470,9 +393,7 @@ def train_each_scale(
     improvement_threshold=0.1,
     batch_size_train=8,
 ):
-    min_epoch = max_epoch
-    num_members = 8
-    # x_scales = (0.01, 1.0, 100.0)
+    min_epoch = max_epoch  # x_scales = (0.01, 1.0, 100.0)
     # y_scales = (0.01, 1.0, 100.0)
     x_scales = (1.0,)
     y_scales = (1.0,)
@@ -482,8 +403,9 @@ def train_each_scale(
 
     if path_out is not None:
         path_out = Path(path_out)
-        path_out.mkdir(exist_ok=True, parents=True)
-        print(f"Created dir: {path_out}")
+        if not path_out.exists():
+            path_out.mkdir(exist_ok=True, parents=True)
+            print(f"Created dir: {path_out}")
 
     # for seed in range(num_seeds):
     for y_scale in y_scales:
@@ -496,7 +418,7 @@ def train_each_scale(
                 else:
                     path_out_s = path_out / f"y{y_scale_str}_x{x_scale_str}"
                     path_out_s.mkdir(exist_ok=True, parents=True)
-                print(f"Created dir: {path_out_s}")
+                    print(f"Created dir: {path_out_s}")
             else:
                 path_out_s = None
             # Data
@@ -520,18 +442,29 @@ def train_each_scale(
                 y_scale=y_scale,
                 scaled=False,
             )
+            input_normalizer = Normalizer(dim_input, device, name="input_normalizer")
+            output_normalizer = Normalizer(
+                dim_output, device, scale=output_scale, name="output_normalizer"
+            )
+            input_normalizer.update_stats(x_train)
+            output_normalizer.update_stats(y_train)
+            input_normalizer.to()
+            output_normalizer.to()
+
             # Train with normalization
-            result = train(
+            model = train(
                 data_train,
                 data_val,
-                x_test,
+                input_normalizer,
+                output_normalizer,
                 dim_input,
                 dim_output,
                 num_members,
-                seed=seed,
+                weight_decay_ratios,
                 dropout_rate=dropout_rate,
                 layer_norm=layer_norm,
-                output_scale=output_scale,
+                seed=seed,
+                pfv=pfv,
                 # Training
                 lr=lr,
                 batch_size_train=batch_size_train,
@@ -539,9 +472,12 @@ def train_each_scale(
                 improvement_threshold=improvement_threshold,
                 min_epoch=min_epoch,
                 max_epoch=max_epoch,
-            )[1]
+            )[0]
+            mus, mu, scale = pred_ensemble(x_test, model, device)
             plot_ensemble(
-                *result,
+                mus,
+                mu,
+                scale,
                 x_train,
                 y_train,
                 x_test,
@@ -549,6 +485,7 @@ def train_each_scale(
                 x_val,
                 y_val,
                 path_out=path_out_s,
+                file_name=file_name,
             )
 
 
@@ -557,12 +494,20 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--path-out", type=str, default=None, help="Path to save results."
     )
+    arg_parser.add_argument(
+        "--file-name", type=str, default=None, help="File name if specified"
+    )
     arg_parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     arg_parser.add_argument(
         "--train-size", type=int, default=20, help="The size of data used for training."
     )
     arg_parser.add_argument(
         "--num-members", type=int, default=8, help="The number of ensemble members."
+    )
+    arg_parser.add_argument(
+        "--pfv",
+        action="store_true",
+        help="Use Priors on Function Value, c.f. eq. (10) and (11) from 'Augmenting Neural Networks with Priors on Function Values'",
     )
     arg_parser.add_argument(
         "--dropout-rate", type=float, default=0.01, help="Dropout rate."
@@ -578,7 +523,7 @@ if __name__ == "__main__":
         "--output-scale",
         type=float,
         default=1.0,
-        help="Output scale for denormalization of model's ouput.",
+        help="Output scale for denormalization of model's output.",
     )
     arg_parser.add_argument(
         "--max-epoch",
@@ -605,16 +550,4 @@ if __name__ == "__main__":
 
     args = arg_parser.parse_args()
 
-    train_each_scale(
-        max_epoch=args.max_epoch,
-        train_size=args.train_size,
-        batch_size_train=args.batch_size_train,
-        dropout_rate=args.dropout_rate,
-        layer_norm=args.layer_norm,
-        output_scale=args.output_scale,
-        lr=args.lr,
-        keep_threshold=args.keep_threshold,
-        improvement_threshold=args.improvement_threshold,
-        path_out=args.path_out,
-        seed=args.seed,
-    )
+    train_each_scale(**args.__dict__)

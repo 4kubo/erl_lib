@@ -105,7 +105,7 @@ class GaussianMLP(Model):
         for i, wd_ratio_i in enumerate(weight_decay_ratios[1:-1]):
             wd_i = wd_ratio_i * weight_decay_base
             dr_i = (max_ratio - wd_ratio_i) * drop_rate_base
-            eps_i = min(max(np.power(10.0, -i), 1e-5), 1.0) * layer_norm
+            eps_i = min(max(np.power(10.0, -i), 1e-5), layer_norm)
             hidden_layers.append(
                 NormalizedEnsembleLinear(
                     num_members,
@@ -122,7 +122,7 @@ class GaussianMLP(Model):
         wd_last = ratio_last * weight_decay_base
         dr_last = (max_ratio - ratio_last) * drop_rate_base
 
-        eps_last = min(max(np.power(10.0, -(depth - 2)), 1e-5), 1.0) * layer_norm
+        eps_last = min(max(np.power(10.0, -(depth - 2)), 1e-5), layer_norm)
         hidden_layers.append(
             NormalizedEnsembleLinear(
                 num_members,
@@ -135,14 +135,6 @@ class GaussianMLP(Model):
         )
 
         self.layers = nn.Sequential(*hidden_layers)
-        index = np.arange(num_members).repeat(int(np.ceil(batch_size / num_members)))
-        index = torch.as_tensor(index)
-        self.base_index = (
-            torch.nn.functional.one_hot(index)
-            .T[..., None]
-            .repeat(1, 1, self.dim_output)
-            .to(device=self.device, dtype=torch.float32)
-        )  # [M, B, D]
         # Homo-scedastic noise
         self._log_noise = nn.Parameter(
             torch.zeros((num_members, 1, self.dim_output), dtype=torch.float32),
@@ -154,6 +146,18 @@ class GaussianMLP(Model):
         self.lb_log_scale = (
             np.log(lb_std) if (lb_std is not None and 0 < lb_std) else None
         )
+
+        if prediction_strategy == PS_TS1:
+            index = np.arange(num_members).repeat(
+                int(np.ceil(batch_size / num_members))
+            )
+            index = torch.as_tensor(index)
+            self.base_index = (
+                torch.nn.functional.one_hot(index)
+                .T[..., None]
+                .repeat(1, 1, self.dim_output)
+                .to(device=self.device, dtype=torch.float32)
+            )  # [M, B, D]
 
         self.eval()
 
@@ -337,10 +341,11 @@ class GaussianMLP(Model):
 
     @torch.no_grad()
     def eval_score(self, batch, log=False):
-        """Computes the squared error for the model over the given input/target."""
+        """Computes the loss on batch."""
         model_in, target, weight = self.process_batch(batch)
         assert model_in.ndim == 2 and target.ndim == 2
         normalize_delta = self.normalize_delta and not self.normalized_target
+        # MSE
         if self.mse_score:
             mus = self.layers(model_in)
             log_std_ale = self._log_noise.mean(0)
@@ -350,6 +355,7 @@ class GaussianMLP(Model):
             eval_score = error.mean(-1)
 
             variance = var_epi + (2 * log_std_ale).exp()
+        # NLL loss
         else:
             mu, log_var_epi, log_var_ale = self.moment_dist(
                 model_in, normalize_delta=normalize_delta
@@ -384,6 +390,8 @@ class GaussianMLP(Model):
             error *= self.output_normalizer.std.square()
         return error
 
+    @property
+    @torch.no_grad()
     def decay_loss(self) -> torch.Tensor:
         decay_loss: torch.Tensor = 0.0  # type: ignore
         for layer in self.layers:
