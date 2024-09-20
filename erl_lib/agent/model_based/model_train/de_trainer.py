@@ -26,6 +26,7 @@ class DETrainer:
         keep_threshold: float = 0.5,
         logger=None,
         silent: bool = True,
+        denormalized_mse: bool = False,
     ):
         self.model = model
         self.num_members = model.num_members
@@ -38,10 +39,7 @@ class DETrainer:
         self.keep_threshold = keep_threshold
         self.logger = logger
         self.silent = silent
-        if logger is not None:
-            self.detail_log = logger.log_level < logging.INFO
-        else:
-            self.detail_log = False
+        self.denormalized_mse = denormalized_mse
 
         # Target model
         self.old_states = {}
@@ -52,7 +50,7 @@ class DETrainer:
         assert (
             improvement_threshold <= keep_threshold
         ), f"{improvement_threshold} > {keep_threshold}"
-        self.early_stop = keep_threshold < 1
+        self.early_stop = improvement_threshold < 1
 
     def train(
         self,
@@ -64,7 +62,9 @@ class DETrainer:
     ):
         """Trains the model for some number of epochs."""
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
-        best_val_score, _ = self.evaluate(dataset_eval)
+        best_val_score, info_eval = self.evaluate(
+            dataset_eval, log=self.denormalized_mse
+        )
 
         if 1 <= self.keep_threshold:
             keep_epochs = num_max_epochs
@@ -77,7 +77,11 @@ class DETrainer:
             continue_p_threshold=self.keep_threshold,
         )
 
-        train_loss_hist, val_score_hist = [], [best_val_score.mean(-1)]
+        train_loss_hist = []
+        if self.denormalized_mse:
+            val_score_hist = [info_eval["eval/rmse"]]
+        else:
+            val_score_hist = [best_val_score.mean(-1)]
 
         time_train, time_eval = 0.0, 0.0
 
@@ -104,12 +108,17 @@ class DETrainer:
                 # Evaluate model
                 t_2 = time.time()
 
-                scores_val, _ = self.evaluate(dataset_eval)
+                scores_val, info_eval = self.evaluate(
+                    dataset_eval, log=self.denormalized_mse
+                )
 
                 with torch.no_grad():
                     train_loss = torch.hstack(batch_losses).mean() / self.num_members
                 train_loss_hist.append(train_loss)
-                val_score_hist.append(scores_val.mean())
+                if self.denormalized_mse:
+                    val_score_hist.append(info_eval["eval/rmse"])
+                else:
+                    val_score_hist.append(scores_val.mean())
 
                 time_train += t_2 - t_1
                 time_eval += time.time() - t_2
@@ -159,13 +168,12 @@ class DETrainer:
                     "last_validation_score": score_val_last,
                     "val_loss_improvement": best_val_score - val_score_hist[0],
                     "best_val_score": best_val_score,
-                    "decay_loss": self.model.decay_loss(),
+                    "decay_loss": self.model.decay_loss,
                     "time_train": time_train,
                     "time_eval": time_eval,
                 },
                 **info,
             )
-            # info.update(info_eval)
 
             self.logger.append("model_train", index, info_val)
 
@@ -199,23 +207,22 @@ class DETrainer:
                 errors = self.model.rescale_error(errors)
                 variances = torch.vstack(vars_list)
                 # MSE
-                mse = errors.sum(1).mean()
-                info["mse"] = mse
-                # Calibration score
+                rmse = errors.sum(1).mean().sqrt()
+                info["rmse"] = rmse
+                # The Expected Normalized Calibration Error (ENCE)
+                # c.f. Evaluating and Calibrating Uncertainty Prediction in Regression Tasks
                 i = variances.argsort(0)
                 n_split = min(dataset.num_stored, 20)
                 bin_idxes = torch.tensor_split(i, n_split)
 
                 rmv = torch.vstack(
                     [torch.take(variances, idx).mean(0) for idx in bin_idxes]
-                )
-                rmse = torch.vstack(
+                ).sqrt()
+                rmses = torch.vstack(
                     [torch.take(errors, idx).mean(0) for idx in bin_idxes]
-                )
-                # The Expected Normalized Calibration Error (ENCE)fo
-                # c.f. Evaluating and Calibrating Uncertainty Prediction in Regression Tasks
-                calib_score = torch.mean(torch.abs(rmv - rmse) / rmv)
-                info["calib_score"] = calib_score
+                ).sqrt()
+                calib_score = torch.mean(torch.abs(rmv - rmses) / rmv)
+                info["ence"] = calib_score
 
         info = {f"eval/{key}": value for key, value in info.items()}
         return scores, info
