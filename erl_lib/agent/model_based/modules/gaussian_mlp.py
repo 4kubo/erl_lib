@@ -5,8 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn as nn
 
-from torch.nn import SmoothL1Loss as Huber
-
 from erl_lib.agent.model_based.modules.model import Model
 from erl_lib.agent.module.layer import (
     NormalizedEnsembleLinear,
@@ -58,7 +56,7 @@ class GaussianMLP(Model):
         # Training
         normalized_target: bool = True,
         mse_score: bool = False,
-        training_loss_fn: str = "nll", # nll or gauss_adapt
+        training_loss_fn: str = "nll",  # nll or gauss_adapt
         **kwargs,
     ):
         if (normalize_input or normalize_delta or normalized_target) and (
@@ -153,7 +151,7 @@ class GaussianMLP(Model):
             np.log(lb_std) if (lb_std is not None and 0 < lb_std) else None
         )
 
-        if prediction_strategy == PS_TS1:
+        if isinstance(batch_size, int) and 0 < batch_size:
             index = np.arange(num_members).repeat(
                 int(np.ceil(batch_size / num_members))
             )
@@ -219,7 +217,6 @@ class GaussianMLP(Model):
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
         """Propagate uncertainty forward with specified `prediction_strategy`."""
         prediction_strategy = prediction_strategy or self.prediction_strategy
-        
         if prediction_strategy in (PS_TS1, PS_INF):
             batch_size = x.shape[0]
             num_samples_per_member = batch_size // self.num_members
@@ -275,24 +272,18 @@ class GaussianMLP(Model):
 
     def predict_mm_direct(self, x, tile=None):
         gauss_noise = torch.randn((self.num_members, x.shape[0], 1), device=self.device)
-        #breakpoint()
         mus = self.layers(x)
-        #mu = torch.sum(mus * shuffle_mask, 0)
-
         mean = mus.mean(0, keepdims=True)
 
-        mu = 1 / np.sqrt(self.num_members) * ((mus - mean) * gauss_noise).sum(axis=0) + mean.squeeze(0)
+        mu = 1 / np.sqrt(self.num_members) * ((mus - mean) * gauss_noise).sum(
+            axis=0
+        ) + mean.squeeze(0)
 
-        #log_std_ale = self._log_noise[shuffle_mask[..., 0].max(0).indices, ...].squeeze(
-        #    1
-        #)
-        #breakpoint()
         log_std_ale = self._log_noise.mean(0)
-
         scale = log_std_ale.exp()
         if self.uncertainty_bonus:
             self.state_entropy = self.uncertainty(mus)
-        #breakpoint()
+        # breakpoint()
         return mu, scale
 
     def uncertainty(self, mus):
@@ -332,7 +323,9 @@ class GaussianMLP(Model):
         mus, log_std_ale = self.base_forward(model_in, normalize_delta=normalize_delta)
         weight = weight.t()
         # Calculate loss
-        if self.training_loss_fn == "nll": # Temporary solution for switching between loss functions
+        if (
+            self.training_loss_fn == "nll"
+        ):  # Temporary solution for switching between loss functions
             loss = self.nll_loss(mus, log_std_ale, target, weight)
         elif self.training_loss_fn == "gauss_adapt":
             loss = self.gauss_adapt_loss(mus, log_std_ale, target, weight)
@@ -374,13 +367,13 @@ class GaussianMLP(Model):
         loss = nll.sum()  # sum over ensemble dimension
         return loss
 
-    def gauss_adapt_loss( #self, y_pred, y, y_std, eps=1e-12):
+    def gauss_adapt_loss(  # self, y_pred, y, y_std, eps=1e-12):
         self,
         pred_mus: torch.Tensor,
         pred_log_noise: torch.Tensor,
         target: torch.Tensor,
         weight: torch.Tensor = 1.0,
-        log=False
+        log=False,
     ) -> torch.Tensor:
         """Negative log-likelihood on mini-batch.
 
@@ -399,10 +392,10 @@ class GaussianMLP(Model):
         else:
             pred_logstd = pred_log_noise
 
-        mean_log = l2_mean_loss.detach().mean(dim=[0,1], keepdims=True).log()
-        mean_log = mean_log.expand(pred_logstd.shape[0],
-                                   mean_log.shape[1],
-                                   mean_log.shape[2])
+        mean_log = l2_mean_loss.detach().mean(dim=[0, 1], keepdims=True).log()
+        mean_log = mean_log.expand(
+            pred_logstd.shape[0], mean_log.shape[1], mean_log.shape[2]
+        )
         pred_logvar = 2 * pred_logstd
         var_loss = F.mse_loss(pred_logvar, mean_log, reduction="none")
 

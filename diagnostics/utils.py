@@ -40,17 +40,43 @@ def plots(amount, cols=4, size=(2, 2.3), xticks=4, yticks=5, grid=(1, 1), **kwar
     return fig, axes
 
 
-def curve(ax, domain, values, low=None, high=None, label=None, order=0, **kwargs):
+def curve(
+    ax,
+    domain,
+    values,
+    low=None,
+    high=None,
+    label=None,
+    order=0,
+    marker=None,
+    markersize="medium",
+    plot_alpha=1.0,
+    fill_alpha=0.2,
+    fill_lw=0,
+    plot_lw=1,
+    **kwargs,
+):
+    bound_alpha = 0.2
     finite = np.isfinite(values)
-    ax.plot(domain[finite], values[finite], label=label, zorder=1000 - order, **kwargs)
+    ax.plot(
+        domain[finite],
+        values[finite],
+        label=label,
+        zorder=1000 - order,
+        marker=marker,
+        markersize=markersize,
+        alpha=plot_alpha,
+        lw=plot_lw,
+        **kwargs,
+    )
     if low is not None:
-        kwargs["lw"] = 0
-        kwargs["alpha"] = 0.2
         ax.fill_between(
             domain[finite],
             low[finite],
             high[finite],
             zorder=100 - order,
+            alpha=fill_alpha,
+            lw=fill_lw,
             **kwargs,
         )
 
@@ -85,26 +111,93 @@ def legend(fig, adjust=False):
         fig.tight_layout(rect=[x0, y0, x1, y1], h_pad=pad, w_pad=pad)
 
 
-def binning(xs, ys, borders, reducer=np.nanmean, fill="nan"):
+def binning(xs, ys, borders, reducer=np.nanmean, fill="last"):
     assert fill in ("nan", "last", "zeros")
+
     xs = xs if isinstance(xs, np.ndarray) else np.asarray(xs)
     ys = ys if isinstance(ys, np.ndarray) else np.asarray(ys)
+
+    bins = np.digitize(xs, borders)
+    max_bin = min(bins.max(), len(borders) - 1)
+    min_bin = max(bins.min() - 1, 0)
+    min_x = borders[min_bin]
+    max_x = borders[max_bin]
+
+    shared_idx = np.where(np.logical_and(min_x <= xs, xs <= max_x))
+
+    xs = xs[shared_idx]
+    ys = ys[shared_idx]
+
     order = np.argsort(xs)
     xs, ys = xs[order], ys[order]
+
     binned = []
-    for start, stop in zip(borders[:-1], borders[1:]):
+    binned_x = []
+    xs_left = ys[: (xs <= min_x).sum()]
+    if len(xs_left) == 0:
+        not_filled = True
+    else:
+        # print(f"xs_left: {xs_left}")
+        binned.append(reduce(xs_left, reducer))
+        binned_x.append(xs[: (xs <= min_x).sum()])
+        not_filled = False
+
+    for start, stop in zip(
+        borders[min_bin:max_bin], borders[min_bin + 1 : max_bin + 1]
+    ):
         left = (xs <= start).sum()
         right = (xs <= stop).sum()
         value = np.nan
         if left < right:
             value = reduce(ys[left:right], reducer)
+            binned_x.append(xs[left:right])
         if np.isnan(value):
             if fill == "zeros":
                 value = 0
             if fill == "last" and binned:
                 value = binned[-1]
         binned.append(value)
-    return borders[1:], np.array(binned)
+    if not_filled:
+        if fill == "zeros":
+            value = 0
+        if fill == "last":
+            value = binned[0]
+        binned = [value] + binned
+    # print(f"{min_x} <= {binned_x}")
+    return borders[min_bin : max_bin + 1], np.array(binned)
+
+
+def set_ticks(ax, labelsize="medium", label=None, x_logscale=False):
+    if x_logscale:
+        ax.set_xscale("log")
+        # ax.ticklabel_format(axis="x", style="sci", useMathText=True)
+        # ax.tick_params(axis="both", which="major", labelsize=labelsize, pad=1, length=1)
+        ax.set_xlabel(label)
+    else:
+        ax.ticklabel_format(axis="x", style="sci", scilimits=(-2, 2), useMathText=True)
+        ax.tick_params(axis="both", which="major", labelsize=labelsize, pad=1, length=1)
+        ax.xaxis.offsetText.set_fontsize("small")
+        # supress sci format
+        if label is not None:
+            Labeloffset(ax, label, "x")
+
+
+class Labeloffset:
+    def __init__(self, ax, label=None, axis="y"):
+        self.axis = {"y": ax.yaxis, "x": ax.xaxis}[axis]
+        self.label = label
+        formatter = ticker.ScalarFormatter(useMathText=True)
+        formatter.set_powerlimits((-3, 2))
+        self.axis.set_major_formatter(formatter)
+        if label is not None:
+            ax.callbacks.connect(axis + "lim_changed", self.update)
+            ax.figure.canvas.draw()
+            self.update(None)
+
+    def update(self, lim):
+        fmt = self.axis.get_major_formatter()
+        self.axis.offsetText.set_visible(False)
+        self.axis.set_label_text(self.label + " " + fmt.get_offset())
 
 
 def reduce(values, reducer=np.nanmean, *args, **kwargs):
@@ -242,5 +335,10 @@ def train(
         0,
         keep_epochs=min_epoch,
         num_max_epochs=max_epoch,
+    )
+    noises = model.print_noise()
+    print(
+        "Unnormalized noise: ",
+        noises * output_normalizer.std.detach().cpu().numpy().T[..., None],
     )
     return model, train_losses, eval_scores, logger

@@ -149,7 +149,7 @@ def run(cfg):
     if cfg.log.checkpoint and cfg.log.only_last_checkpoint:
         dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"
         os.makedirs(dir_ckpt, exist_ok=True)
-        agent.save(dir_ckpt)
+        agent.save(dir_ckpt, last=True)
 
     logger.info(f"Finished @ Time steps {int(cfg.common.max_time_steps):,d}")
     envs.close()

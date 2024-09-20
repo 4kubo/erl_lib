@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import json
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -41,6 +42,7 @@ def train_each_scale(
     lr=0.001,
     keep_threshold=0.5,
     improvement_threshold=0.1,
+    train_loss_fn="nll",
     batch_size=500_000,
     mini_batch_size=2048,
 ):
@@ -116,7 +118,7 @@ def train_each_scale(
     )
     train_losses = torch.as_tensor(result[1]).cpu().numpy()
     val_scores = torch.as_tensor(result[2]).cpu().numpy()
-    # infos = result[3]
+    infos = result[3]
     if path_out is not None:
         path_out = Path(path_out)
         if not path_out.exists():
@@ -131,6 +133,12 @@ def train_each_scale(
             train_losses=train_losses,
             val_scores=val_scores,
         )
+        infos = {
+            key: value.item() if isinstance(value, torch.Tensor) else value
+            for key, value in infos.info.items()
+        }
+        with open(path_out / "last_infos.json", "w") as f:
+            json.dump(infos, f)
 
 
 if __name__ == "__main__":
@@ -205,6 +213,13 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="The improvement threshold used for early stopping in model training.",
+    )
+    arg_parser.add_argument(  # with choice selection
+        "--train-loss-fn",
+        type=str,
+        default="gauss_adapt",
+        help="The loss function used for training the model.",
+        choices=["nll", "gauss_adapt"],
     )
 
     args = arg_parser.parse_args()

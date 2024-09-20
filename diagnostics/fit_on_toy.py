@@ -316,6 +316,23 @@ def plot_ensemble(
 
 
 # %%
+def compute_rmse_loss(model, data, device):
+    model.eval()
+    with torch.no_grad():
+        x = data.obs.cpu().numpy()
+        y = data.next_obs.cpu().numpy()
+
+        mus, mu, _ = pred_ensemble(x, model, device)
+
+        loss_mean = ((mu - y) ** 2).sum(axis=1).mean()
+        loss_mean = np.sqrt(loss_mean)
+        loss_individual = np.sqrt(
+            ((mus - y.reshape(1, *y.shape)) ** 2).sum(axis=2).mean()
+        )
+
+    return loss_mean, loss_individual
+
+
 def train_each_scale(
     path_out=None,
     file_name=None,
@@ -397,7 +414,6 @@ def train_each_scale(
 
             # Train with normalization
             model = train(
-                # >>>>>>> master
                 data_train,
                 data_val,
                 input_normalizer,
@@ -419,6 +435,18 @@ def train_each_scale(
                 min_epoch=min_epoch,
                 max_epoch=max_epoch,
             )[0]
+            # Compute RMSE loss
+            loss_train_mean, loss_train_individual = compute_rmse_loss(
+                model, data_train, device
+            )
+            loss_val_mean, loss_val_individual = compute_rmse_loss(
+                model, data_val, device
+            )
+            print(f"Train RMSE loss: {loss_train_mean}")
+            print(f"Train individual RMSE loss: {loss_train_individual}")
+            print(f"Validation RMSE loss: {loss_val_mean}")
+            print(f"Validation individual RMSE loss: {loss_val_individual}")
+
             mus, mu, scale = pred_ensemble(x_test, model, device)
             plot_ensemble(
                 mus,
