@@ -230,7 +230,7 @@ class SVGAgent(SACAgent):
         max_epochs = int(factor * self.max_epochs)
         self.model_trainer.train(
             iterator_train,
-            dataset_eval=iterator_valid,
+            dataset_val=iterator_valid,
             env_step=self.num_samples,
             keep_epochs=keep_epochs,
             num_max_epochs=max_epochs,

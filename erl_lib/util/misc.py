@@ -1,6 +1,7 @@
 import numpy as np
 import random
 import json
+from copy import copy
 import pathlib
 import torch
 from torch import nn
@@ -216,6 +217,15 @@ class ReplayBuffer:
     def all_data(self):
         data = self._buffer[: self.num_stored, : self.dim_data]
         return TransitionBatch(data, self.split_section_dict, device=self.device_to)
+
+    def __getitem__(self, index):
+        num_data = len(index)
+        new_obj = copy(self)
+        new_obj._buffer = new_obj._buffer.clone()
+        new_obj._buffer[:num_data] = self._buffer[index]
+        new_obj.num_stored = num_data
+        new_obj.cur_idx = 0
+        return new_obj
 
     def __len__(self):
         return self.num_stored

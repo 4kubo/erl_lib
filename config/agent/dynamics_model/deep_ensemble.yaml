@@ -15,6 +15,7 @@ weight_decay_ratios:
 priors_on_function_values: False
 prediction_strategy: ts_1
 mse_score: False
+sum_over_data: True
 training_loss_fn: nll
 normalized_target: True
 residual: False

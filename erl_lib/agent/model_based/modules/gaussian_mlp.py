@@ -56,11 +56,12 @@ class GaussianMLP(Model):
         # Training
         normalized_target: bool = True,
         mse_score: bool = False,
+        sum_over_data: bool = True,
         training_loss_fn: str = "nll",  # nll or gauss_adapt
         **kwargs,
     ):
-        if (normalize_input or normalize_delta or normalized_target) and (
-            not normalize_input or not normalized_target
+        if (not normalized_target and normalize_delta) or (
+            normalized_target and not normalize_input
         ):
             raise NotImplementedError
         assert 0 <= layer_norm
@@ -86,6 +87,7 @@ class GaussianMLP(Model):
         # Model training
         self.normalized_target = normalized_target
         self.mse_score = mse_score
+        self.sum_over_data = sum_over_data
 
         self.training_loss_fn = training_loss_fn
 
@@ -310,7 +312,7 @@ class GaussianMLP(Model):
         self,
         batch: TransitionBatch,
         optimizer: torch.optim.Optimizer,
-        grad_clip: float = 0.0,
+        log: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Updates the model given a batch of transitions and an optimizer."""
         model_in, target, weight = self.process_batch(batch, training=True)
@@ -327,15 +329,28 @@ class GaussianMLP(Model):
             self.training_loss_fn == "nll"
         ):  # Temporary solution for switching between loss functions
             loss = self.nll_loss(mus, log_std_ale, target, weight)
-        elif self.training_loss_fn == "gauss_adapt":
+        else:
+            assert self.training_loss_fn == "gauss_adapt"
             loss = self.gauss_adapt_loss(mus, log_std_ale, target, weight)
 
         loss.backward()
-        if grad_clip:
-            nn.utils.clip_grad_value_(self.parameters(), grad_clip)
-
         optimizer.step()
-        return loss, {}
+
+        if log:
+            with torch.no_grad():
+                mu = mus.mean(0)
+                diff = mu - target.mean(0)
+                if self.normalize_delta and self.normalized_target:
+                    std = self.output_normalizer.std / self.output_normalizer.scale
+                    diff *= std
+                error = diff.square()
+                se = error.sum(-1)
+                max_error = diff.abs().mean(-1).max()
+            info = {"squared_error": se, "max_error": max_error}
+        else:
+            info = {}
+
+        return loss, info
 
     def nll_loss(
         self,
@@ -361,10 +376,9 @@ class GaussianMLP(Model):
             pred_logstd = pred_log_noise.clamp_min(self.lb_log_scale)
         else:
             pred_logstd = pred_log_noise
-        nll = torch.sum(l2 * inv_var + pred_logstd, -1)
-        nll = torch.mean(nll * weight, dim=-1)  # average over batch
-
-        loss = nll.sum()  # sum over ensemble dimension
+        losses = l2 * inv_var + pred_logstd
+        loss = losses.sum(-1) if self.sum_over_data else losses.mean(-1)
+        loss = (loss * weight).sum(0).mean()
         return loss
 
     def gauss_adapt_loss(  # self, y_pred, y, y_std, eps=1e-12):
@@ -399,13 +413,11 @@ class GaussianMLP(Model):
         pred_logvar = 2 * pred_logstd
         var_loss = F.mse_loss(pred_logvar, mean_log, reduction="none")
 
-        l2_mean_loss = l2_mean_loss.sum(dim=2)
-        l2_mean_loss = l2_mean_loss.mean(dim=1)
-        var_loss = var_loss.sum(dim=2)
-        var_loss = var_loss.mean(dim=1)
-
-        loss = l2_mean_loss.sum() + var_loss.sum()
-
+        losses = l2_mean_loss + var_loss
+        if self.sum_over_data:
+            loss = losses.sum([0, 2]).mean()
+        else:
+            loss = losses.sum(0).mean()
         return loss
 
     @torch.no_grad()
@@ -414,33 +426,28 @@ class GaussianMLP(Model):
         model_in, target, weight = self.process_batch(batch)
         assert model_in.ndim == 2 and target.ndim == 2
         normalize_delta = self.normalize_delta and not self.normalized_target
-        # MSE
-        if self.mse_score:
-            mus = self.layers(model_in)
-            log_std_ale = self._log_noise.mean(0)
-            var_epi = mus.var(0)
-            error = F.mse_loss(mus, target[None, ...], reduction="none")
-            error = error.mean(0)
-            eval_score = error.mean(-1)
 
-            variance = var_epi + (2 * log_std_ale).exp()
-        # NLL loss
+        mu, log_var_epi, log_var_ale = self.moment_dist(
+            model_in, normalize_delta=normalize_delta
+        )
+        error = torch.square(target - mu)  # [B, D]
+
+        var_epi = log_var_epi.exp()
+        variance = log_var_ale.exp() + var_epi
+
+        if self.mse_score:
+            eval_score = error.sum(-1)
         else:
-            mu, log_var_epi, log_var_ale = self.moment_dist(
-                model_in, normalize_delta=normalize_delta
-            )
-            var_epi = log_var_epi.exp()
-            variance = log_var_ale.exp() + var_epi
-            log_std_ale = log_var_ale * 0.5
             scale_log = variance.log() * 0.5
 
-            error = torch.square(target - mu)  # [B, D]
-            score = 0.5 * error / variance + scale_log
-            eval_score = score.sum(-1)  # [B, D] -> [B]
+            eval_scores = 0.5 * error / variance + scale_log
+            eval_score = eval_scores.sum(-1)  # [B, D] -> [B]
 
         # Logging
         info = {}
         if log == "detail":
+            log_std_ale = log_var_ale * 0.5
+
             log_std_epi_ = var_epi.sqrt().log().mean(0)
             log_std_ale_ = log_std_ale.mean(0)
 
@@ -452,12 +459,29 @@ class GaussianMLP(Model):
 
         return eval_score, error, variance, info
 
-    def rescale_error(self, error):
+    def rescale_error(self, error, variance):
         if self.normalize_delta is None and self.normalized_target:
-            error[:, 1:] *= self.input_normalizer.std.square()
+            std = self.input_normalizer.std / self.input_normalizer.scale
+            var = std.square()
+            error[:, 1:] *= var
+            variance[:, 1:] *= var
         elif self.normalize_delta and self.normalized_target:
-            error *= self.output_normalizer.std.square()
-        return error
+            std = self.output_normalizer.std / self.output_normalizer.scale
+            var = std.square()
+            error *= var
+            variance *= var
+        return error, variance
+
+    def mse(self, mus, log_std_ale, target, variance=False):
+        mu = mus.mean(0)
+        error = F.mse_loss(mu, target, reduction="none")
+        mse = error.sum(-1)
+        if variance:
+            var_epi = mus.var(0)
+            variance = var_epi + (2 * log_std_ale).exp()
+            return error, mse, variance
+        else:
+            return error, mse
 
     @property
     @torch.no_grad()
@@ -567,12 +591,17 @@ class GaussianMLP(Model):
                 obs_mu = mu
                 obs_scale = scale
                 reward = None
-            next_obs = obs + obs_mu + epsilon * obs_scale
+            obs_delta = obs_mu + epsilon * obs_scale
+            if not self.normalized_target and self.normalize_po_input:
+                input_std = self.input_normalizer.std
+                obs_delta /= input_std
+            next_obs = obs + obs_delta
 
         if self.term_fn:
             obs_t = obs
             next_obs_t = next_obs
-            if self.normalized_target and self.normalize_po_input:
+            # if self.normalized_target and self.normalize_po_input:
+            if self.normalize_po_input:
                 obs_t = self.input_normalizer.denormalize(obs_t)
                 next_obs_t = self.input_normalizer.denormalize(next_obs_t)
             terminated = self.term_fn(obs_t, act, next_obs_t)

@@ -1,7 +1,8 @@
 from typing import Dict, List
 import time
-import logging
+from collections import defaultdict
 from copy import deepcopy
+import re
 import numpy as np
 from scipy import stats
 from tqdm import trange
@@ -26,7 +27,6 @@ class DETrainer:
         keep_threshold: float = 0.5,
         logger=None,
         silent: bool = True,
-        denormalized_mse: bool = False,
     ):
         self.model = model
         self.num_members = model.num_members
@@ -39,7 +39,6 @@ class DETrainer:
         self.keep_threshold = keep_threshold
         self.logger = logger
         self.silent = silent
-        self.denormalized_mse = denormalized_mse
 
         # Target model
         self.old_states = {}
@@ -55,16 +54,30 @@ class DETrainer:
     def train(
         self,
         dataset_train: TransitionIterator,
-        dataset_eval: TransitionIterator,
+        dataset_val: TransitionIterator,
         env_step: int,
         num_max_epochs: int,
+        dataset_eval: TransitionIterator = None,
         keep_epochs: int = 1,
+        log_detail=False,
     ):
         """Trains the model for some number of epochs."""
         self.optimizer = optim.AdamW(self.model.optimized_parameters(), lr=self.lr)
-        best_val_score, info_eval = self.evaluate(
-            dataset_eval, log=self.denormalized_mse
+
+        train_metric_hist, val_metric_hist, eval_metric_hist = (
+            defaultdict(list),
+            defaultdict(list),
+            defaultdict(list),
         )
+        best_val_score, info_val = self.evaluate(dataset_val, log=log_detail)
+        for key, value in info_val.items():
+            if not re.match(r"\d", key.split("/")[-1]):
+                val_metric_hist[key].append(value)
+        if dataset_eval:
+            best_eval_score, info_eval = self.evaluate(dataset_eval, log=log_detail)
+            for key, value in info_eval.items():
+                if not re.match(r"\d", key.split("/")[-1]):
+                    eval_metric_hist[key].append(value)
 
         if 1 <= self.keep_threshold:
             keep_epochs = num_max_epochs
@@ -77,12 +90,6 @@ class DETrainer:
             continue_p_threshold=self.keep_threshold,
         )
 
-        train_loss_hist = []
-        if self.denormalized_mse:
-            val_score_hist = [info_eval["eval/rmse"]]
-        else:
-            val_score_hist = [best_val_score.mean(-1)]
-
         time_train, time_eval = 0.0, 0.0
 
         iterator = trange(
@@ -93,32 +100,34 @@ class DETrainer:
 
             for epoch in pbar:
                 # Train model
-                batch_losses: List[torch.Tensor] = []
+                batch_metrics = defaultdict(list)
                 log = True
                 info = {}
                 t_1 = time.time()
                 self.model.train()
                 for batch in dataset_train:
-                    loss, info_ = self.model.update(batch, self.optimizer)
-                    batch_losses.append(loss.detach())
-                    if log:
-                        info = info_
-                    log = False
+                    loss, info = self.model.update(batch, self.optimizer, log)
+                    batch_metrics["train_loss"].append(loss.detach())
+                    for key, value in info.items():
+                        batch_metrics[key].append(value)
+                    log = log_detail
+                for key, value in batch_metrics.items():
+                    self.agg_batch_metrics(key, value, train_metric_hist)
 
                 # Evaluate model
                 t_2 = time.time()
 
-                scores_val, info_eval = self.evaluate(
-                    dataset_eval, log=self.denormalized_mse
-                )
-
-                with torch.no_grad():
-                    train_loss = torch.hstack(batch_losses).mean() / self.num_members
-                train_loss_hist.append(train_loss)
-                if self.denormalized_mse:
-                    val_score_hist.append(info_eval["eval/rmse"])
-                else:
-                    val_score_hist.append(scores_val.mean())
+                scores_val, info_val = self.evaluate(dataset_val, log=log_detail)
+                for key, value in info_val.items():
+                    if not re.match(r"\d", key.split("/")[-1]):
+                        val_metric_hist[key].append(value)
+                if dataset_eval:
+                    best_eval_score, info_eval = self.evaluate(
+                        dataset_eval, log=log_detail
+                    )
+                    for key, value in info_eval.items():
+                        if not re.match(r"\d", key.split("/")[-1]):
+                            eval_metric_hist[key].append(value)
 
                 time_train += t_2 - t_1
                 time_eval += time.time() - t_2
@@ -130,6 +139,7 @@ class DETrainer:
                 # Misc process for progress bar if needed
                 if not self.silent and (2 < t_2 - t_p):
                     t_p = time.time()
+                    train_loss = train_metric_hist["train_loss"][-1]
                     pbar.set_postfix(
                         {
                             "Train": train_loss.item(),
@@ -155,31 +165,30 @@ class DETrainer:
                 "iteration": self._train_iteration,
                 "env_step": env_step,
             }
-
-            scores_val_last, info_val = self.evaluate(dataset_eval, log=True)
+            info_train = {key: value[-1] for key, value in train_metric_hist.items()}
+            scores_val_last, info_val = self.evaluate(dataset_val, log=True)
             score_val_last = scores_val_last.mean()
             info_val.update(
                 {
                     "epoch": epoch,
                     "best_epoch": best_epoch,
-                    "train_dataset_size": dataset_train.num_stored,
-                    "val_dataset_size": dataset_eval.num_stored,
-                    "last_train_loss": train_loss,
                     "last_validation_score": score_val_last,
-                    "val_loss_improvement": best_val_score - val_score_hist[0],
                     "best_val_score": best_val_score,
                     "decay_loss": self.model.decay_loss,
                     "time_train": time_train,
                     "time_eval": time_eval,
                 },
-                **info,
+                **info_train,
             )
-
+            info_val = {
+                key: value.item() if isinstance(value, torch.Tensor) else value
+                for key, value in info_val.items()
+            }
             self.logger.append("model_train", index, info_val)
 
         self._train_iteration += 1
 
-        return train_loss_hist, val_score_hist
+        return train_metric_hist, val_metric_hist, eval_metric_hist
 
     def evaluate(self, dataset: TransitionIterator, log=False):
         """Evaluates the model on the validation dataset."""
@@ -204,11 +213,14 @@ class DETrainer:
 
             if log:
                 errors = torch.vstack(errors_list)
-                errors = self.model.rescale_error(errors)
                 variances = torch.vstack(vars_list)
-                # MSE
+                errors, variances = self.model.rescale_error(errors, variances)
+                # Errors
                 rmse = errors.sum(1).mean().sqrt()
-                info["rmse"] = rmse
+                info["root_mean_squared_error"] = rmse
+                root_median_se = errors.sum(1).median().sqrt()
+                info["root_median_squared_error"] = root_median_se
+                info["max_error"] = errors.sqrt().mean(1).max()
                 # The Expected Normalized Calibration Error (ENCE)
                 # c.f. Evaluating and Calibrating Uncertainty Prediction in Regression Tasks
                 i = variances.argsort(0)
@@ -223,9 +235,40 @@ class DETrainer:
                 ).sqrt()
                 calib_score = torch.mean(torch.abs(rmv - rmses) / rmv)
                 info["ence"] = calib_score
+                # NLL
+                scale_log = variances.log() * 0.5
+                nlls = 0.5 * errors / variances + scale_log
+                info["nll"] = nlls.mean().sum()
 
         info = {f"eval/{key}": value for key, value in info.items()}
         return scores, info
+
+    @staticmethod
+    def agg_batch_metrics(key, value_batch, metric_dict):
+        append = isinstance(metric_dict, defaultdict)
+        metric = torch.hstack(value_batch)
+        if "max" in key:
+            metric = metric.max()
+            if append:
+                metric_dict[key].append(metric)
+            else:
+                metric_dict[key] = metric
+        elif "squared_error" in key:
+            # value = torch.hstack(value_batch)
+            root_mean = metric.mean().sqrt()
+            root_median = metric.median().sqrt()
+            if append:
+                metric_dict[f"root_mean_{key}"].append(root_mean)
+                metric_dict[f"root_median_{key}"].append(root_median)
+            else:
+                metric_dict[f"root_mean_{key}"] = root_mean
+                metric_dict[f"root_median_{key}"] = root_median
+        else:
+            metric = metric.mean()
+            if append:
+                metric_dict[key].append(metric)
+            else:
+                metric_dict[key] = metric
 
 
 class EarlyStopping:

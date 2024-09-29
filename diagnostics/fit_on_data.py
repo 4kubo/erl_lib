@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from erl_lib.base.datatype import TransitionBatch
 from erl_lib.util.env import make_envs
 from erl_lib.util.misc import ReplayBuffer, Normalizer
 from erl_lib.agent.model_based.modules.gaussian_mlp import PS_MM
@@ -26,6 +27,17 @@ silent = False
 device = "cuda"
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 def train_each_scale(
     # task_name="MBWalker2d",
     path_data=".",
@@ -42,6 +54,8 @@ def train_each_scale(
     lr=0.001,
     keep_threshold=0.5,
     improvement_threshold=0.1,
+    normalized_target=True,
+    learned_reward=False,
     train_loss_fn="nll",
     batch_size=500_000,
     mini_batch_size=2048,
@@ -56,7 +70,10 @@ def train_each_scale(
     dim_obs, dim_act = make_envs(cfg.env, 1)[1:3]
 
     dim_input = dim_obs + dim_act
-    dim_output = dim_obs + 1
+    if learned_reward:
+        dim_output = dim_obs + 1
+    else:
+        dim_output = dim_obs
     cfg.agent.steps_per_iter = 1000
     cfg.agent.dynamics_model.dim_input = dim_input
     cfg.agent.dynamics_model.dim_output = dim_output
@@ -71,20 +88,32 @@ def train_each_scale(
         MASK: 1,
         WEIGHT: num_members,
     }
-    replay_buffer = ReplayBuffer(
-        cfg.agent.buffer_size,
-        "cpu",
-        max_batch_size=batch_size,
-        split_section_dict=split_section_dict,
-        split_validation=True,
-        num_sample_weights=num_members,
+    dir_checkpoint = path_data / ckpt_path
+    with open(dir_checkpoint / "replay_buffer.json", "r") as f:
+        saved_params = json.load(f)
+    num_stored = saved_params["num_stored"]
+    dim_data = sum(split_section_dict.values())
+    data = torch.load(
+        dir_checkpoint / "replay_buffer.pt", map_location=torch.device("cpu")
+    )[:, :dim_data]
+    # Dataset with split into training / validation
+    data_train = data[:batch_size]
+    rng = np.random.default_rng(seed=seed)
+    batch_idx = rng.permutation(batch_size)
+    data_train = data_train[batch_idx]
+    batch_size_train = int(0.8 * batch_size)
+    batch_train = TransitionBatch(
+        data_train[:batch_size_train], split_section_dict, device=device
     )
-    replay_buffer.load(path_data / ckpt_path)
-
-    train_data, val_data = replay_buffer.split_data()
-    target_obs = train_data.next_obs - train_data.obs
-    input_sample = train_data.obs.cpu().numpy()
-    output_sample = torch.cat([train_data.reward, target_obs], 1).cpu().numpy()
+    data_val = TransitionBatch(
+        data_train[batch_size_train:], split_section_dict, device=device
+    )
+    target_obs = batch_train.next_obs - batch_train.obs
+    input_sample = batch_train.obs.cpu().numpy()
+    if learned_reward:
+        output_sample = torch.cat([batch_train.reward, target_obs], 1).cpu().numpy()
+    else:
+        output_sample = target_obs.cpu().numpy()
     input_normalizer = Normalizer(dim_obs, device, name="input_normalizer")
     output_normalizer = Normalizer(
         dim_output, device, scale=output_scale, name="output_normalizer"
@@ -94,15 +123,21 @@ def train_each_scale(
     input_normalizer.to()
     output_normalizer.to()
 
+    # Dataset of out-of-distribution for evaluation
+    size_ood = min(num_stored - batch_size, 5000)
+    data_eval = data[-size_ood:]
+    batch_eval = TransitionBatch(data_eval, split_section_dict, device=device)
+
     result = train(
-        train_data,
-        val_data,
+        batch_train,
+        data_val,
         input_normalizer,
         output_normalizer,
         dim_input,
         dim_output,
         None,
         None,
+        batch_eval=batch_eval,
         cfg=cfg.agent.dynamics_model,
         dropout_rate=dropout_rate,
         layer_norm=layer_norm,
@@ -110,15 +145,28 @@ def train_each_scale(
         pfv=pfv,
         # Training
         lr=lr,
+        normalized_target=str2bool(normalized_target),
+        learned_reward=learned_reward,
+        train_loss_fn=train_loss_fn,
         batch_size_train=mini_batch_size,
         keep_threshold=keep_threshold,
         improvement_threshold=improvement_threshold,
         min_epoch=max_epoch,
         max_epoch=max_epoch,
     )
-    train_losses = torch.as_tensor(result[1]).cpu().numpy()
-    val_scores = torch.as_tensor(result[2]).cpu().numpy()
-    infos = result[3]
+    train_metric_hist = {
+        f"train/{key}": torch.stack(val).cpu().numpy() for key, val in result[1].items()
+    }
+    val_metric_hist = {
+        f"val/{key.split('/', 1)[1]}": torch.stack(val).cpu().numpy()
+        for key, val in result[2].items()
+    }
+    eval_metric_hist = {
+        key: torch.stack(val).cpu().numpy() for key, val in result[3].items()
+    }
+    # val_rmse = torch.stack((result[2]["eval/rmse"])).cpu().numpy()
+    # val_nll = torch.stack((result[2]["eval/nll"])).cpu().numpy()
+    infos = result[4]
     if path_out is not None:
         path_out = Path(path_out)
         if not path_out.exists():
@@ -128,11 +176,8 @@ def train_each_scale(
             "train_val_scores.npz" if file_prefix is None else f"{file_prefix}.npz"
         )
         file_name = path_out / file_name
-        np.savez(
-            file_name,
-            train_losses=train_losses,
-            val_scores=val_scores,
-        )
+        np.savez(file_name, **train_metric_hist, **val_metric_hist, **eval_metric_hist)
+        # Summary of the learning
         infos = {
             key: value.item() if isinstance(value, torch.Tensor) else value
             for key, value in infos.info.items()
@@ -162,6 +207,7 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--num-members", type=int, default=8, help="The number of ensemble members."
     )
+    arg_parser.add_argument("--learned-reward", action="store_true")
     arg_parser.add_argument(
         "--pfv",
         action="store_true",
@@ -213,6 +259,11 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="The improvement threshold used for early stopping in model training.",
+    )
+    arg_parser.add_argument(
+        "--normalized-target",
+        choices=["True", "False"],
+        default="True",
     )
     arg_parser.add_argument(  # with choice selection
         "--train-loss-fn",

@@ -49,7 +49,7 @@ def curve(
     label=None,
     order=0,
     marker=None,
-    markersize="medium",
+    markersize=2,
     plot_alpha=1.0,
     fill_alpha=0.2,
     fill_lw=0,
@@ -81,7 +81,7 @@ def curve(
         )
 
 
-def legend(fig, adjust=False):
+def legend(fig, adjust=False, **kwargs):
     options = dict(
         fontsize="medium",
         numpoints=1,
@@ -92,6 +92,7 @@ def legend(fig, adjust=False):
         ncol=4,
         loc="lower center",
     )
+    options.update(kwargs)
     # Find all labels and remove duplicates.
     entries = {}
     for ax in fig.axes:
@@ -241,18 +242,21 @@ def plot_learning_curve(train_losses, eval_scores, label_prefixs, file_prefix=No
 
 
 def train(
-    data_train,
-    data_val,
+    batch_train,
+    batch_val,
     input_normalizer,
     output_normalizer,
     dim_input,
     dim_output,
     num_members,
     weight_decay_ratios,
+    batch_eval=None,
     cfg=None,
     dropout_rate=0.01,
     layer_norm=1e-5,
     pfv=False,
+    normalized_target=True,
+    learned_reward=False,
     train_loss_fn="nll",
     lr=0.001,
     batch_size_train=2048,
@@ -288,6 +292,7 @@ def train(
             dim_output=dim_output,
             device=device,
             num_members=num_members,
+            normalized_target=normalized_target,
             training_loss_fn=train_loss_fn,
             drop_rate_base=dropout_rate,
             layer_norm=layer_norm,
@@ -309,6 +314,9 @@ def train(
             drop_rate_base=dropout_rate,
             layer_norm=layer_norm,
             priors_on_function_values=pfv,
+            normalized_target=normalized_target,
+            normalize_delta=normalized_target,
+            learned_reward=learned_reward,
         )
 
     model_trainer = DETrainer(
@@ -318,27 +326,34 @@ def train(
         improvement_threshold=improvement_threshold,
         silent=silent,
         logger=logger,
-        denormalized_mse=True,
     )
     # Preprocess for model training
     iterator_train = TransitionIterator(
-        data_train, batch_size_train, shuffle_each_epoch=True, device=device
+        batch_train, batch_size_train, shuffle_each_epoch=True, device=device
     )
     iterator_val = TransitionIterator(
-        data_val, float("inf"), shuffle_each_epoch=False, device=device
+        batch_val, float("inf"), shuffle_each_epoch=False, device=device
     )
+    if batch_eval:
+        iterator_eval = TransitionIterator(
+            batch_eval, float("inf"), shuffle_each_epoch=False, device=device
+        )
+    else:
+        iterator_eval = None
 
     # Train the model
-    train_losses, eval_scores = model_trainer.train(
+    train_metric_hist, val_metric_hist, eval_metric_hist = model_trainer.train(
         iterator_train,
         iterator_val,
         0,
+        dataset_eval=iterator_eval,
         keep_epochs=min_epoch,
         num_max_epochs=max_epoch,
+        log_detail=True,
     )
     noises = model.print_noise()
     print(
         "Unnormalized noise: ",
         noises * output_normalizer.std.detach().cpu().numpy().T[..., None],
     )
-    return model, train_losses, eval_scores, logger
+    return model, train_metric_hist, val_metric_hist, eval_metric_hist, logger
