@@ -128,6 +128,7 @@ class SACAgent(BaseAgent):
         )
 
         self.normalize_po_input = normalize_po_input
+        self.normalized_buffer = not normalize_po_input
         self.input_normalizer = Normalizer(
             self.dim_obs,
             self.device,
@@ -216,12 +217,12 @@ class SACAgent(BaseAgent):
     def update_critic(self, replay_buffer, log=False):
         for i in range(self.num_critic_iter):
             batch = replay_buffer.sample(self.batch_size)
-            if self.normalize_po_input:
-                obs = self.input_normalizer.normalize(batch.obs)
-                next_obs = self.input_normalizer.normalize(batch.next_obs)
-            else:
+            if self.normalized_buffer:
                 obs = batch.obs
                 next_obs = batch.next_obs
+            else:
+                obs = self.input_normalizer.normalize(batch.obs)
+                next_obs = self.input_normalizer.normalize(batch.next_obs)
 
             action, reward = batch.action, batch.reward
             if self.bounded_critic or self.scaled_critic:
@@ -444,7 +445,10 @@ class SACAgent(BaseAgent):
             self._q_ub = modules["q_ub"]
             self._q_width = modules["q_width"]
             self._q_center = modules["q_center"]
-        self.replay_buffer.load(dir_checkpoint)
+        try:
+            self.replay_buffer.load(dir_checkpoint)
+        except FileNotFoundError:
+            print(f"Replay buffer not found: {dir_checkpoint}")
         if self.normalize_po_input:
             self.input_normalizer.load(dir_checkpoint)
 

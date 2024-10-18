@@ -44,6 +44,9 @@ class VectorEnv(SyncVectorEnv, BaseEnv):
     def termination_model(self):
         return getattr(self.envs[0].unwrapped, "termination_model", None)
 
+    def render(self):
+        return self.envs[0].render()
+
 
 class CustomVideoRecorder(VideoRecorder):
     def __init__(

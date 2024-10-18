@@ -184,7 +184,7 @@ class GaussianMLP(Model):
             log_std_ale = self._log_noise
         return mus, log_std_ale
 
-    def moment_dist(self, x, normalize_delta=None, log=False):
+    def moment_dist(self, x, normalize_delta=None, log=False, post_process=None):
         """Mu and sigma in Gaussian distribution's parameter."""
         mus = self.layers(x)
         log_var_ale = self._log_noise.mean(0) * 2
@@ -195,7 +195,9 @@ class GaussianMLP(Model):
 
         # c.f. eq. (10) and (11) from "Augmenting Neural Networks with Priors on
         # Function Values"
-        if self.priors_on_function_values:
+        if post_process is None:
+            post_process = self.priors_on_function_values
+        if post_process == "pfv":
             mu /= 1 + var_epi
             log_var_epi -= torch.log1p(var_epi)
 
@@ -212,8 +214,8 @@ class GaussianMLP(Model):
             log_var_epi += sample_log_var
             log_var_ale += sample_log_var
 
-        if self.uncertainty_bonus:
-            self.uncertainty(mus)
+        if self.uncertainty_bonus or log:
+            self.state_entropy = self.uncertainty(mus)
         return mu, log_var_epi, log_var_ale
 
     def forward(self, x: torch.Tensor, prediction_strategy=None, **kwargs):
@@ -272,7 +274,7 @@ class GaussianMLP(Model):
             self.state_entropy = self.uncertainty(mus)
         return mu, scale
 
-    def predict_mm_direct(self, x, tile=None):
+    def predict_mm_direct(self, x):
         gauss_noise = torch.randn((self.num_members, x.shape[0], 1), device=self.device)
         mus = self.layers(x)
         mean = mus.mean(0, keepdims=True)
@@ -346,7 +348,14 @@ class GaussianMLP(Model):
                 error = diff.square()
                 se = error.sum(-1)
                 max_error = diff.abs().mean(-1).max()
-            info = {"squared_error": se, "max_error": max_error}
+                max_l2_error = diff.square().mean(-1).sqrt().max()
+                max_target = target.abs().mean((0, 2)).max()
+            info = {
+                "squared_error": se,
+                "max_error": max_error,
+                "max_l2_error": max_l2_error,
+                "max_target": max_target,
+            }
         else:
             info = {}
 
@@ -428,7 +437,10 @@ class GaussianMLP(Model):
         normalize_delta = self.normalize_delta and not self.normalized_target
 
         mu, log_var_epi, log_var_ale = self.moment_dist(
-            model_in, normalize_delta=normalize_delta
+            model_in,
+            normalize_delta=normalize_delta,
+            log=log,
+            post_process=False,
         )
         error = torch.square(target - mu)  # [B, D]
 
@@ -445,17 +457,20 @@ class GaussianMLP(Model):
 
         # Logging
         info = {}
-        if log == "detail":
-            log_std_ale = log_var_ale * 0.5
+        if log:
+            info["uncertainty"] = self.state_entropy.detach()
 
-            log_std_epi_ = var_epi.sqrt().log().mean(0)
-            log_std_ale_ = log_std_ale.mean(0)
+            if log == "detail":
+                log_std_ale = log_var_ale * 0.5
 
-            for dim, (logstd_epi_d, logstd_ale_d) in enumerate(
-                zip(log_std_epi_, log_std_ale_)
-            ):
-                info[f"{dim}_logstd_epi"] = logstd_epi_d
-                info[f"{dim}_logstd_ale"] = logstd_ale_d
+                log_std_epi_ = var_epi.sqrt().log().mean(0)
+                log_std_ale_ = log_std_ale.mean(0)
+
+                for dim, (logstd_epi_d, logstd_ale_d) in enumerate(
+                    zip(log_std_epi_, log_std_ale_)
+                ):
+                    info[f"{dim}_logstd_epi"] = logstd_epi_d
+                    info[f"{dim}_logstd_ale"] = logstd_ale_d
 
         return eval_score, error, variance, info
 
@@ -558,6 +573,37 @@ class GaussianMLP(Model):
         model_in = torch.cat([obs_input, act], dim=obs.ndim - 1)
         mu, scale = self.forward(model_in, log=log, **kwargs)
 
+        info = {}
+        # Log before adding noises
+        if log:
+            with torch.no_grad():
+                if self.learned_reward:
+                    reward_mu, obs_mu = torch.tensor_split(mu.abs(), [1], 1)
+                    reward_scale, obs_scale = torch.tensor_split(scale, [1], 1)
+                    info.update(
+                        {
+                            # "{sample (std, max)}_{dimension (l1, l2)}_{obs / reward}_{mu / scale}"
+                            # Observation
+                            "std_obs_mu": obs_mu.std(0).mean(),
+                            "mean_obs_scale": obs_scale.mean(),
+                            "max_l1_obs_mu": obs_mu.abs().mean(-1).max(),
+                            "max_l2_obs_mu": obs_mu.square().mean(-1).sqrt().max(),
+                            # Reward
+                            "mean_reward": reward_mu.mean(),
+                            "max_l1_reward_mu": reward_mu.abs().max(),
+                            "max_l2_reward_mu": reward_mu.square()
+                            .mean(-1)
+                            .sqrt()
+                            .max(),
+                            # "max_l2_reward_scal": reward_mu.square().mean(-1).std(),
+                        }
+                    )
+                else:
+                    info["max_obs_mu"] = mu.abs().max()
+                    info["max_obs_scale"] = scale.max()
+            if self.uncertainty_bonus:
+                info.update(uncertainty_bonus=self.state_entropy.mean())
+
         epsilon = torch.randn_like(obs)
         if self.normalize_delta:
             mu[..., 1:] += scale[..., 1:] * epsilon
@@ -610,7 +656,7 @@ class GaussianMLP(Model):
         if isinstance(terminated, bool):
             terminated = torch.full_like(reward, terminated, dtype=torch.bool)
 
-        return next_obs, reward, terminated, {}
+        return next_obs, reward, terminated, info
 
     def optimized_parameters(self, recurse: bool = True):
         params = []

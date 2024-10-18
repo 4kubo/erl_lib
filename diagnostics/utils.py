@@ -81,7 +81,7 @@ def curve(
         )
 
 
-def legend(fig, adjust=False, **kwargs):
+def legend(fig, adjust=False, sort_key=None, linewidth=None, **kwargs):
     options = dict(
         fontsize="medium",
         numpoints=1,
@@ -98,8 +98,13 @@ def legend(fig, adjust=False, **kwargs):
     for ax in fig.axes:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             entries[label] = handle
+    if sort_key:
+        entries = {key: value for key, value in sorted(entries.items(), key=sort_key)}
     leg = fig.legend(entries.values(), entries.keys(), **options)
     leg.get_frame().set_edgecolor("white")
+    if linewidth:
+        for line in leg.get_lines():
+            line.set_linewidth(linewidth)
     if adjust is not False:
         pad = adjust if isinstance(adjust, (int, float)) else 0.5
         extent = leg.get_window_extent(fig.canvas.get_renderer())
@@ -112,22 +117,27 @@ def legend(fig, adjust=False, **kwargs):
         fig.tight_layout(rect=[x0, y0, x1, y1], h_pad=pad, w_pad=pad)
 
 
-def binning(xs, ys, borders, reducer=np.nanmean, fill="last"):
+def binning(xs, ys, borders, reducer=np.nanmean, fixed_maxx=False, fill="last"):
     assert fill in ("nan", "last", "zeros")
 
     xs = xs if isinstance(xs, np.ndarray) else np.asarray(xs)
     ys = ys if isinstance(ys, np.ndarray) else np.asarray(ys)
 
-    bins = np.digitize(xs, borders)
-    max_bin = min(bins.max(), len(borders) - 1)
-    min_bin = max(bins.min() - 1, 0)
-    min_x = borders[min_bin]
-    max_x = borders[max_bin]
+    if fixed_maxx:
+        min_x = 0
+        max_bin = len(borders) - 1
+        min_bin = 0
+    else:
+        bins = np.digitize(xs, borders)
+        max_bin = min(bins.max(), len(borders) - 1)
+        min_bin = max(bins.min() - 1, 0)
+        min_x = borders[min_bin]
+        max_x = borders[max_bin]
 
-    shared_idx = np.where(np.logical_and(min_x <= xs, xs <= max_x))
+        shared_idx = np.where(np.logical_and(min_x <= xs, xs <= max_x))
 
-    xs = xs[shared_idx]
-    ys = ys[shared_idx]
+        xs = xs[shared_idx]
+        ys = ys[shared_idx]
 
     order = np.argsort(xs)
     xs, ys = xs[order], ys[order]
@@ -169,18 +179,18 @@ def binning(xs, ys, borders, reducer=np.nanmean, fill="last"):
 
 
 def set_ticks(ax, labelsize="medium", label=None, x_logscale=False):
+    ax.set_xlabel(label)
     if x_logscale:
         ax.set_xscale("log")
         # ax.ticklabel_format(axis="x", style="sci", useMathText=True)
         # ax.tick_params(axis="both", which="major", labelsize=labelsize, pad=1, length=1)
-        ax.set_xlabel(label)
     else:
         ax.ticklabel_format(axis="x", style="sci", scilimits=(-2, 2), useMathText=True)
         ax.tick_params(axis="both", which="major", labelsize=labelsize, pad=1, length=1)
         ax.xaxis.offsetText.set_fontsize("small")
         # supress sci format
-        if label is not None:
-            Labeloffset(ax, label, "x")
+        # if label is not None:
+        #     Labeloffset(ax, label, "x")
 
 
 class Labeloffset:
@@ -317,7 +327,9 @@ def train(
             normalized_target=normalized_target,
             normalize_delta=normalized_target,
             learned_reward=learned_reward,
+            training_loss_fn=train_loss_fn,
         )
+    print(f"Model's loss fn: {model.training_loss_fn}")
 
     model_trainer = DETrainer(
         model,

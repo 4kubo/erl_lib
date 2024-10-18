@@ -210,7 +210,7 @@ if __name__ == "__main__":
     arg_parser.add_argument("--learned-reward", action="store_true")
     arg_parser.add_argument(
         "--pfv",
-        action="store_true",
+        type=str,
         help="Use Priors on Function Value, c.f. eq. (10) and (11) from 'Augmenting Neural Networks with Priors on Function Values'",
     )
     arg_parser.add_argument(

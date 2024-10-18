@@ -194,12 +194,12 @@ class DETrainer:
         """Evaluates the model on the validation dataset."""
         scores_list, errors_list, vars_list = [], [], []
         total_batch_size = 0
-        info = {}
+        info = defaultdict(list)
 
         with torch.no_grad():
             self.model.eval()
             for i, batch in enumerate(dataset):
-                log_i = "detail" if log and (i == len(dataset) - 1) else False
+                log_i = "detail" if log and (i == len(dataset) - 1) else log
                 batch_score, error, variance, info_ = self.model.eval_score(
                     batch, log=log_i
                 )
@@ -207,11 +207,15 @@ class DETrainer:
                 errors_list.append(error)
                 vars_list.append(variance)
                 total_batch_size += len(batch)
-                info.update(**info_)
+                for key, value in info_.items():
+                    info[key].append(value)
 
             scores = torch.hstack(scores_list)
+            for key, value in info.items():
+                info[key] = torch.hstack(value).mean()
 
             if log:
+                # errors: [B, D]
                 errors = torch.vstack(errors_list)
                 variances = torch.vstack(vars_list)
                 errors, variances = self.model.rescale_error(errors, variances)
@@ -221,6 +225,7 @@ class DETrainer:
                 root_median_se = errors.sum(1).median().sqrt()
                 info["root_median_squared_error"] = root_median_se
                 info["max_error"] = errors.sqrt().mean(1).max()
+                info["max_l2_error"] = errors.mean(1).sqrt().max()
                 # The Expected Normalized Calibration Error (ENCE)
                 # c.f. Evaluating and Calibrating Uncertainty Prediction in Regression Tasks
                 i = variances.argsort(0)

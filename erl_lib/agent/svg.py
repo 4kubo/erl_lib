@@ -14,6 +14,10 @@ from erl_lib.base.agent import BaseAgent
 from erl_lib.agent.sac import SACAgent
 from erl_lib.base import (
     OBS,
+    ACTION,
+    REWARD,
+    MASK,
+    NEXT_OBS,
     Q_MEAN,
     Q_STD,
     KEY_ACTOR_LOSS,
@@ -122,9 +126,19 @@ class SVGAgent(SACAgent):
             logger=self.logger,
         )
         # Replay/Rollout buffer
+        self.normalized_buffer = True
         self.replay_buffer.poisson_weights = model_train.poisson_weights
         self.capacity = self.num_rollout_samples * retain_model_buffer_iter
-        split_section_dict = {OBS: self.dim_obs}
+        if 0 < self.training_rollout_horizon:
+            split_section_dict = {OBS: self.dim_obs}
+        else:
+            split_section_dict = {
+                OBS: self.dim_obs,
+                ACTION: self.dim_act,
+                REWARD: 1,
+                NEXT_OBS: self.dim_obs,
+                MASK: 1,
+            }
         self.rollout_buffer = ReplayBuffer(
             self.capacity,
             self.device,
@@ -180,7 +194,7 @@ class SVGAgent(SACAgent):
                 self.rollout_buffer.clear()
                 self.init_optimizer()
                 # Policy evaluation just after model learning
-                if 0 < self.num_critic_iter:
+                if 0 < self.training_rollout_horizon and 0 < self.num_critic_iter:
                     if 0 < self.rollout_horizon:
                         self.distribution_rollout(
                             num_rollout_samples=self.num_critic_samples
@@ -190,7 +204,7 @@ class SVGAgent(SACAgent):
                         **self.kwargs_trange,
                         desc="[Critic]",
                     )
-                    self.update_critic(iterator=critic_iter)
+                    self.mb_update_critic(iterator=critic_iter)
 
                 # --------------- Agent Training -----------------
                 self.update(first_update)
@@ -262,11 +276,41 @@ class SVGAgent(SACAgent):
                 )
                 obss = rollouts[0]
                 masks = rollouts[4]
-                batch_obs = torch.cat(
-                    [obs[mask.squeeze(-1)] for obs, mask in zip(obss, masks)]
-                )
-                ctx_modules.buffer.add_batch([batch_obs])
-                num_sampled += batch_obs.shape[0]
+                if 0 < self.training_rollout_horizon:
+                    batch_obs = torch.cat(
+                        [obs[mask.squeeze(-1)] for obs, mask in zip(obss, masks)]
+                    )
+                    ctx_modules.buffer.add_batch([batch_obs])
+                    num_sampled += batch_obs.shape[0]
+                else:
+                    obss = torch.stack(obss)
+                    actions = torch.stack(rollouts[1][:-1])
+                    rewards = torch.stack(rollouts[3])
+                    masks = torch.stack(masks[1:])
+
+                    shift_idx = torch.cat(
+                        [
+                            torch.ones(
+                                1, masks.size(1), dtype=torch.bool, device=self.device
+                            ),
+                            masks[:-1, :],
+                        ],
+                        dim=0,
+                    )
+                    done_time = (shift_idx == True) & (masks == False)
+                    target_idx = masks.clone()
+                    target_idx[done_time] = True
+
+                    valid_xs = obss[:-1][target_idx]
+                    valid_us = actions[target_idx]
+                    valid_rs = rewards[target_idx].unsqueeze(1)
+                    valid_xps = obss[1:][target_idx]
+                    valid_nd = masks[target_idx].unsqueeze(1)
+                    ctx_modules.buffer.add_batch(
+                        [valid_xs, valid_us, valid_rs, valid_xps, valid_nd]
+                    )
+
+                    num_sampled += valid_nd.shape[0]
 
             if num_rollout_samples <= num_sampled:
                 if self.uara:
@@ -283,7 +327,7 @@ class SVGAgent(SACAgent):
         log_prob = dist.log_prob(action).sum(-1, keepdims=True)
         return action, log_prob, dist
 
-    def update_critic(self, iterator, log=False, **kwargs):
+    def mb_update_critic(self, iterator, log=False, **kwargs):
         for i in iterator:
             with self.policy_evaluation_context(detach=True) as ctx_modules:
                 batch = ctx_modules.buffer.sample(self.batch_size)
@@ -328,6 +372,7 @@ class SVGAgent(SACAgent):
                 log_pis,
                 rewards,
                 masks,
+                infos,
             ) = self.rollout(
                 ctx_modules,
                 obs,
@@ -365,7 +410,7 @@ class SVGAgent(SACAgent):
             q_mean = pred_values.mean()
             q_std = pred_values.std(-1).mean()
 
-            self._info.update(**{Q_MEAN: q_mean, Q_STD: q_std})
+            self._info.update(**{Q_MEAN: q_mean, Q_STD: q_std}, **infos[-1])
 
         return (
             batch_sa,
@@ -399,6 +444,7 @@ class SVGAgent(SACAgent):
             [~done],
         )
 
+        infos = []
         for step in range(rollout_horizon):
             # Sample action
             if 0 < step:
@@ -421,7 +467,7 @@ class SVGAgent(SACAgent):
             rewards.append(rewards_i.squeeze(-1))
             done |= done_i.squeeze(-1)
             masks.append(~done)
-            self._info.update(**info_s)
+            infos.append(info_s)
 
         obss.append(obs)
 
@@ -431,7 +477,7 @@ class SVGAgent(SACAgent):
 
         log_pis.append(log_pi.squeeze(-1))
 
-        return obss, actions, log_pis, rewards, masks
+        return obss, actions, log_pis, rewards, masks, infos
 
     def eval_rollout(
         self,
@@ -502,7 +548,10 @@ class SVGAgent(SACAgent):
                 ):
                     self.distribution_rollout(**ctx_kwargs)
                 last_step = opt_step == num_po_iter - 1
-                self._update(last_step, **ctx_kwargs)
+                if self.training_rollout_horizon <= 0:
+                    super().update(opt_step, log=last_step, buffer=self.rollout_buffer)
+                else:
+                    self._update(last_step, **ctx_kwargs)
                 # Misc process for Std-output
                 t2 = time.time()
                 elapsed = t2 - t1
@@ -552,7 +601,7 @@ class SVGAgent(SACAgent):
             )
 
             # Update the actor
-            self.update_actor(
+            self.mb_update_actor(
                 ctx_modules,
                 batch_sa,
                 batch_mask,
@@ -565,14 +614,18 @@ class SVGAgent(SACAgent):
         self._info["num_updated"] = self.num_updated
         return self._info
 
-    def _actor_loss(self, ctx_modules, log_pis, batch_sa, rewards, masks, log=False):
+    def _actor_loss(
+        self, ctx_modules, log_pis, batch_sa, rewards, masks, discounts=None, log=False
+    ):
+        if discounts is None:
+            discounts = self.discount_mat
         pred_qs = ctx_modules.pred_terminal_q(batch_sa[..., -self.batch_size :, :])
         mc_q_pred = torch.cat([rewards, pred_qs])
         mc_q_pred.sub_(ctx_modules.alpha.detach() * log_pis)
-        mc_v_pred = self.discount_mat[:1, :].mm(mc_q_pred * masks).t()
+        mc_v_pred = discounts[:1, :].mm(mc_q_pred * masks).t()
         return -mc_v_pred.mean()
 
-    def update_actor(
+    def mb_update_actor(
         self,
         ctx_modules,
         batch_sa,
