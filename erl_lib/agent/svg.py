@@ -103,11 +103,14 @@ class SVGAgent(SACAgent):
         self.rollout_freq = rollout_freq
         # Policy optimization
         if training_rollout_horizon < mve_horizon:
-            raise ValueError(
+            self.logger.warning(
                 f"Should 'mve_horizon' <= 'training_rollout_horizon', but {training_rollout_horizon} < {mve_horizon:}"
             )
+            mve_horizon = training_rollout_horizon
         self.mve_horizon = mve_horizon
         self.training_rollout_horizon = training_rollout_horizon
+        self.with_dist_rollout = 0 < self.rollout_horizon and 0 < self.rollout_freq
+
         self.update_after_episode = update_after_episode
         # Model training
         self.model_batch_size = model_train.model_batch_size
@@ -333,7 +336,9 @@ class SVGAgent(SACAgent):
                 batch = ctx_modules.buffer.sample(self.batch_size)
                 obs = batch.obs.clone()
                 # When using replay buffer
-                if self.rollout_horizon <= 0 and self.input_normalizer:
+                if (
+                    self.rollout_horizon <= 0 or not self.with_dist_rollout
+                ) and self.normalize_po_input:
                     obs = self.input_normalizer.normalize(obs)
 
                 # Model-based value expansion and calculate critic loss
@@ -541,11 +546,7 @@ class SVGAgent(SACAgent):
         # Main loop
         with iterator as pbar:
             for opt_step in pbar:
-                if (
-                    0 < self.rollout_horizon
-                    and 0 < self.rollout_freq
-                    and opt_step % self.rollout_freq == 0
-                ):
+                if self.with_dist_rollout and opt_step % self.rollout_freq == 0:
                     self.distribution_rollout(**ctx_kwargs)
                 last_step = opt_step == num_po_iter - 1
                 if self.training_rollout_horizon <= 0:
@@ -569,7 +570,9 @@ class SVGAgent(SACAgent):
             batch = ctx_modules.buffer.sample(self.batch_size)
             obs = batch.obs.clone()
             # The case using replay buffer and normalization
-            if self.rollout_horizon <= 0 and self.normalize_po_input:
+            if (
+                self.rollout_horizon <= 0 or not self.with_dist_rollout
+            ) and self.normalize_po_input:
                 obs = self.input_normalizer.normalize(obs)
 
             # Critics
@@ -664,7 +667,7 @@ class SVGAgent(SACAgent):
 
     @contextmanager
     def policy_evaluation_context(self, detach=False, **kwargs):
-        if 0 < self.rollout_horizon:
+        if 0 < self.rollout_horizon and self.with_dist_rollout:
             buffer = self.rollout_buffer
         else:
             buffer = self.replay_buffer

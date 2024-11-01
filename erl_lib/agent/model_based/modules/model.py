@@ -66,4 +66,6 @@ class Model(nn.Module):
 
     def load(self, load_dir: Union[str, pathlib.Path]):
         """Loads the model from the given path."""
-        self.load_state_dict(torch.load(pathlib.Path(load_dir) / "model.pt"))
+        self.load_state_dict(
+            torch.load(pathlib.Path(load_dir) / "model.pt", map_location=self.device)
+        )

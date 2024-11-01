@@ -23,6 +23,7 @@ scaled_critic: True
 # SVG specific
 rollout_horizon: 20
 rollout_freq: 20
+retain_model_buffer_iter: 10
 training_rollout_horizon: 5
 mve_horizon: 1
 learned_reward: True

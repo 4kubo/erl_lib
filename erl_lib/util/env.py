@@ -3,6 +3,7 @@ from typing import Optional
 import numpy as np
 import gymnasium
 from gymnasium import error, logger
+
 from gymnasium.vector.sync_vector_env import SyncVectorEnv
 from gymnasium.wrappers.monitoring.video_recorder import VideoRecorder
 from gymnasium.wrappers import (
