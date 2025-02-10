@@ -68,6 +68,7 @@ class ReplayBuffer:
         split_section_dict=None,
         num_sample_weights=0,
         poisson_weights=False,
+        latest_samples: bool = False,
     ):
         self.capacity = int(capacity)
         self.max_batch_size = max_batch_size
@@ -92,6 +93,8 @@ class ReplayBuffer:
         )
         self.cur_idx = 0
         self.num_stored = 0
+
+        self.last_idxs = [] if latest_samples else None
 
     def add(self, data_list: list):
         """Adds a transition compatible with 'self.split_section_dict'.
@@ -131,6 +134,9 @@ class ReplayBuffer:
         idxes = np.arange(self.cur_idx, self.cur_idx + batch_size) % self.capacity
         self._buffer[idxes, ...] = data
 
+        if self.last_idxs is not None:
+            self.last_idxs.extend(idxes)
+
         self.cur_idx = (self.cur_idx + batch_size) % self.capacity
         self.num_stored = min(self.num_stored + batch_size, self.capacity)
 
@@ -146,9 +152,14 @@ class ReplayBuffer:
         batch_size: int,
     ) -> TransitionBatch:
         """Samples a batch of transitions from the replay buffer."""
-        indices = torch.randint(
-            high=self.num_stored, size=(batch_size,), device=self.device
-        )
+        if self.last_idxs is not None:
+            num_last = len(self.last_idxs)
+            batch_size = min(batch_size, num_last)
+            indices = np.random.choice(self.last_idxs, batch_size)
+        else:
+            indices = torch.randint(
+                high=self.num_stored, size=(batch_size,), device=self.device
+            )
         return self._batch_from_indices(indices)
 
     def _batch_from_indices(self, indices) -> TransitionBatch:
@@ -167,7 +178,8 @@ class ReplayBuffer:
         pass
 
     def clear(self):
-        pass
+        if self.last_idxs is not None:
+            self.last_idxs = []
 
     def split_data(self):
         assert self.split_validation

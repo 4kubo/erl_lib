@@ -140,7 +140,12 @@ def run(cfg):
             callbacks=callbacks_if_need(cfg),
         )
         # Checkpoint
-        if cfg.log.checkpoint and not cfg.log.only_last_checkpoint:
+        time_step = agent.time_steps_total
+        if (
+            (0 < cfg.log.checkpoint)
+            and (time_step % cfg.log.checkpoint == 0)
+            and not cfg.log.only_last_checkpoint
+        ):
             dir_ckpt = f"{log_dir}/checkpoint/{agent.time_steps_total:0>10}"
             os.makedirs(dir_ckpt, exist_ok=True)
             last = cfg.common.max_time_steps <= agent.time_steps_total

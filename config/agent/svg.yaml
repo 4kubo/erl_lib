@@ -26,9 +26,13 @@ rollout_freq: 20
 retain_model_buffer_iter: 10
 training_rollout_horizon: 5
 mve_horizon: 1
+use_mve: True
+on_policy_samples: False
 learned_reward: True
 split_validation: True
 num_sample_weights: ${agent.dynamics_model.num_members}
+no_epi_train_roll: False
+no_epi_dist_roll: False
 # Uncertainty-Aware Rollout Adaptation
 uara: False
 zeta_quantile: 0.95

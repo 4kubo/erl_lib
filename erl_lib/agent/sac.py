@@ -66,6 +66,7 @@ class SACAgent(BaseAgent):
         init_alpha: float,
         lr_alpha: float,
         entropy_balance: float,
+        on_policy_samples: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -125,7 +126,9 @@ class SACAgent(BaseAgent):
             split_section_dict=field_shapes,
             split_validation=split_validation,
             num_sample_weights=num_sample_weights,
+            latest_samples=on_policy_samples,
         )
+        self.on_policy_samples = on_policy_samples
 
         self.normalize_po_input = normalize_po_input
         self.normalized_buffer = not normalize_po_input

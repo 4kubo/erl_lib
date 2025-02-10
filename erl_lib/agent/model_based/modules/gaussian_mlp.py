@@ -21,6 +21,7 @@ PS_MMD = "moment_matching_direct"
 PS_TS1 = "ts_1"
 PS_TS1_F = "ts_1_full"
 PS_INF = "ts_infinity"
+PS_NO_EPISTEMIC = "no_epi"
 
 
 class GaussianMLP(Model):
@@ -53,6 +54,7 @@ class GaussianMLP(Model):
         priors_on_function_values: bool = False,
         prediction_strategy: str = PS_TS1,
         uncertainty_bonus: bool = True,
+        no_epistemic_pred: bool = True,
         # Training
         normalized_target: bool = True,
         mse_score: bool = False,
@@ -81,9 +83,17 @@ class GaussianMLP(Model):
         self.normalized_reward = normalized_reward
         self.delta_prediction = delta_prediction
         self.priors_on_function_values = priors_on_function_values
-        assert prediction_strategy in [PS_MM, PS_TS1, PS_TS1_F, PS_INF, PS_MMD]
+        assert prediction_strategy in [
+            PS_MM,
+            PS_TS1,
+            PS_TS1_F,
+            PS_INF,
+            PS_MMD,
+            PS_NO_EPISTEMIC,
+        ]
         self.prediction_strategy = prediction_strategy
         self.uncertainty_bonus = uncertainty_bonus
+        self.no_epistemic_pred = no_epistemic_pred
         # Model training
         self.normalized_target = normalized_target
         self.mse_score = mse_score
@@ -254,8 +264,9 @@ class GaussianMLP(Model):
             variance = log_var_ale.exp() + log_var_epi.exp()
             scale = variance.sqrt()
         else:
-            mu = self.layers(x)
-            scale = self._log_noise.exp()
+            assert prediction_strategy == PS_NO_EPISTEMIC
+            mu = self.layers(x)[0]
+            scale = self._log_noise[0].exp()
 
         return mu, scale
 

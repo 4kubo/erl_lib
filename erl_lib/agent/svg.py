@@ -2,6 +2,7 @@ from abc import ABCMeta
 from contextlib import contextmanager, nullcontext
 from typing import Callable
 from dataclasses import dataclass
+from copy import deepcopy
 import time
 
 import numpy as np
@@ -30,7 +31,7 @@ from erl_lib.util.misc import (
     TransitionIterator,
     ReplayBuffer,
 )
-from erl_lib.agent.model_based.modules.gaussian_mlp import PS_TS1_F
+from erl_lib.agent.model_based.modules.gaussian_mlp import PS_TS1_F, PS_NO_EPISTEMIC
 
 
 class SVGAgent(SACAgent):
@@ -46,19 +47,29 @@ class SVGAgent(SACAgent):
         training_rollout_horizon,
         rollout_freq,
         mve_horizon,
+        use_mve: bool,
         retain_model_buffer_iter: int = 10,
         normalize_input: bool = True,
         normalize_output: bool = True,
         normalize_delta: bool = True,
         denormalize_scale: float = 1.0,
         update_after_episode: bool = True,
+        no_epi_train_roll: bool = False,
+        no_epi_dist_roll: bool = False,
         uara=True,
         zeta_quantile=0.95,
         uara_xi=10.0,
         lr_kappa: float = 0.01,
         **kwargs,
     ):
-        if rollout_horizon <= 0:
+        self.with_dist_rollout = (
+            0 < rollout_horizon
+            and 0 < rollout_freq
+            and not kwargs.get("on_policy_samples", False)
+        )
+        td_k_horizon = mve_horizon  # For compatibility. TODO: Remove here
+
+        if not self.with_dist_rollout:
             kwargs["buffer_device"] = "cuda"
             rollout_freq = 0
         if kwargs["num_critic_iter"] is None:
@@ -101,17 +112,19 @@ class SVGAgent(SACAgent):
         self.rollout_horizon = rollout_horizon
         self.num_rollout_samples = self.batch_size * rollout_freq
         self.rollout_freq = rollout_freq
-        # Policy optimization
-        if training_rollout_horizon < mve_horizon:
+        # Policy evaluation
+        if training_rollout_horizon < td_k_horizon:
             self.logger.warning(
-                f"Should 'mve_horizon' <= 'training_rollout_horizon', but {training_rollout_horizon} < {mve_horizon:}"
+                f"Should 'td_k_horizon' <= 'training_rollout_horizon', but {training_rollout_horizon} < {td_k_horizon:}"
             )
-            mve_horizon = training_rollout_horizon
-        self.mve_horizon = mve_horizon
+            td_k_horizon = training_rollout_horizon
+        self.td_k_horizon = td_k_horizon
+        self.use_mve = use_mve
         self.training_rollout_horizon = training_rollout_horizon
-        self.with_dist_rollout = 0 < self.rollout_horizon and 0 < self.rollout_freq
 
         self.update_after_episode = update_after_episode
+        self.no_epi_train_roll = no_epi_train_roll
+        self.no_epi_dist_roll = no_epi_dist_roll
         # Model training
         self.model_batch_size = model_train.model_batch_size
         self.val_batch_size = model_train.val_batch_size
@@ -153,11 +166,11 @@ class SVGAgent(SACAgent):
         self.done = torch.full(
             (self.batch_size,), False, device=self.device, dtype=torch.bool
         )
-        if 0 < self.mve_horizon:
+        if 0 < self.td_k_horizon:
             discount_exps = torch.stack(
                 [
                     torch.arange(-i, -i + self.training_rollout_horizon + 1)
-                    for i in range(mve_horizon)
+                    for i in range(td_k_horizon)
                 ],
                 dim=0,
             ).to(self.device)
@@ -198,19 +211,27 @@ class SVGAgent(SACAgent):
                 self.init_optimizer()
                 # Policy evaluation just after model learning
                 if 0 < self.training_rollout_horizon and 0 < self.num_critic_iter:
+                    rollout_kwargs = {"num_rollout_samples": self.num_critic_samples}
+                    if self.no_epi_dist_roll:
+                        rollout_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
                     if 0 < self.rollout_horizon:
-                        self.distribution_rollout(
-                            num_rollout_samples=self.num_critic_samples
-                        )
+                        self.distribution_rollout(**rollout_kwargs)
                     critic_iter = trange(
                         self.num_critic_iter,
                         **self.kwargs_trange,
                         desc="[Critic]",
                     )
-                    self.mb_update_critic(iterator=critic_iter)
+                    critic_ctx_kwargs = {}
+                    if self.no_epi_train_roll:
+                        critic_ctx_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
+                    self.mb_update_critic(iterator=critic_iter, **critic_ctx_kwargs)
 
                 # --------------- Agent Training -----------------
                 self.update(first_update)
+
+                if self.on_policy_samples:
+                    self.replay_buffer.clear()
+
                 if self.is_epoch_done:
                     self.logger.append(
                         "policy_optimization",
@@ -269,13 +290,12 @@ class SVGAgent(SACAgent):
 
                 action = self.sample_action(ctx_modules.actor, obs)[0]
 
-                prediction_strategy = PS_TS1_F if self.uara else None
                 rollouts = self.rollout(
                     ctx_modules,
                     obs,
                     action,
                     self.rollout_horizon,
-                    prediction_strategy=prediction_strategy,
+                    # prediction_strategy=prediction_strategy,
                 )
                 obss = rollouts[0]
                 masks = rollouts[4]
@@ -332,7 +352,7 @@ class SVGAgent(SACAgent):
 
     def mb_update_critic(self, iterator, log=False, **kwargs):
         for i in iterator:
-            with self.policy_evaluation_context(detach=True) as ctx_modules:
+            with self.policy_evaluation_context(detach=True, **kwargs) as ctx_modules:
                 batch = ctx_modules.buffer.sample(self.batch_size)
                 obs = batch.obs.clone()
                 # When using replay buffer
@@ -386,20 +406,40 @@ class SVGAgent(SACAgent):
                 done=done,
                 log_pi=log_pi.squeeze(-1),
                 log=log,
-                prediction_strategy=prediction_strategy,
+                # prediction_strategy=prediction_strategy,
             )
         batch_mask = torch.stack(masks).float()
         batch_sa = torch.cat([torch.cat(obss, -2), torch.cat(actions, -2)], -1)
         log_pis = torch.stack(log_pis)
         rewards = torch.stack(rewards)
 
+        with torch.no_grad():
+            if self.bounded_critic or self.scaled_critic:
+                reward_pi = rewards - ctx_modules.alpha * log_pis[:-1, :]
+                reward_lb, reward_ub = torch.quantile(reward_pi, self.q_th)
+                (
+                    self._q_lb,
+                    self._q_ub,
+                    self._q_center,
+                    self._q_width,
+                ) = self.update_critic_bound(
+                    self._q_lb, self._q_ub, reward_lb, reward_ub
+                )
+                self._info.update(
+                    **{
+                        "reward_ub": reward_ub,
+                        "reward_lb": reward_lb,
+                        "q_ub": self._q_ub,
+                        "q_lb": self._q_lb,
+                    }
+                )
+
         target_value, pred_values = self.eval_rollout(
             ctx_modules=ctx_modules,
-            batch_sa=batch_sa[..., : self.mve_horizon * self.batch_size, :],
+            sa_batch=batch_sa,
             log_pis=log_pis,
             batch_masks=batch_mask,
             rewards=rewards,
-            last_sa=batch_sa[..., -self.batch_size :, :],
             discounts=self.discount_mat,
         )
         loss_critic = F.mse_loss(pred_values, target_value, reduction="none")
@@ -464,7 +504,7 @@ class SVGAgent(SACAgent):
             obs, rewards_i, done_i, info_s = ctx_modules.model_step(
                 action,
                 obs,
-                prediction_strategy=prediction_strategy,
+                # prediction_strategy=prediction_strategy,
                 log=log,
                 step=step,
             )
@@ -487,41 +527,39 @@ class SVGAgent(SACAgent):
     def eval_rollout(
         self,
         ctx_modules,
-        batch_sa,
+        sa_batch,
         log_pis,
         batch_masks,
         rewards,
-        last_sa,
         discounts,
     ):
         with torch.no_grad():
-            if self.bounded_critic or self.scaled_critic:
-                reward_pi = rewards - ctx_modules.alpha * log_pis[:-1, :]
-                reward_lb, reward_ub = torch.quantile(reward_pi, self.q_th)
-                (
-                    self._q_lb,
-                    self._q_ub,
-                    self._q_center,
-                    self._q_width,
-                ) = self.update_critic_bound(
-                    self._q_lb, self._q_ub, reward_lb, reward_ub
-                )
-                self._info.update(
-                    **{
-                        "reward_ub": reward_ub,
-                        "reward_lb": reward_lb,
-                        "q_ub": self._q_ub,
-                        "q_lb": self._q_lb,
-                    }
-                )
-            q_values = ctx_modules.pred_target_q(last_sa)
-            target_rewards = torch.cat([rewards, q_values[None, ..., 0]])
-            target_rewards[1:, ...].sub_(ctx_modules.alpha.detach() * log_pis[1:, ...])
-            target_values = discounts.mm(target_rewards * batch_masks).unsqueeze(-1)
+            sa_eval = sa_batch[..., : self.td_k_horizon * self.batch_size, :].detach()
 
-        pred_values = ctx_modules.pred_q(batch_sa.detach())
+            if self.use_mve:
+                sa_term = sa_batch[..., -self.batch_size :, :]
+
+                q_values = ctx_modules.pred_target_q(sa_term)
+                target_rewards = torch.cat([rewards, q_values[None, ..., 0]])
+                target_rewards[1:, ...].sub_(
+                    ctx_modules.alpha.detach() * log_pis[1:, ...]
+                )
+                target_values = discounts.mm(target_rewards * batch_masks).unsqueeze(-1)
+            else:
+                sa_target = sa_batch[..., self.batch_size :, :]
+
+                q_values = ctx_modules.pred_target_q(sa_target).view(
+                    self.training_rollout_horizon, -1
+                )
+                next_value = q_values - ctx_modules.alpha * log_pis[1:, ...]
+                target_values = (
+                    rewards + batch_masks[1:, ...] * self.discount * next_value
+                )
+                target_values = target_values.unsqueeze(-1)
+
+        pred_values = ctx_modules.pred_q(sa_eval)
         pred_values = pred_values.view(
-            self.mve_horizon, self.batch_size, self.num_critic_ensemble
+            self.td_k_horizon, self.batch_size, self.num_critic_ensemble
         )
         deviation = discounts.shape[1] - discounts.shape[0]
         pred_values.mul_(batch_masks[:-deviation, :, None])
@@ -547,11 +585,16 @@ class SVGAgent(SACAgent):
         with iterator as pbar:
             for opt_step in pbar:
                 if self.with_dist_rollout and opt_step % self.rollout_freq == 0:
-                    self.distribution_rollout(**ctx_kwargs)
+                    rollout_kwargs = deepcopy(ctx_kwargs)
+                    if self.no_epi_dist_roll:
+                        rollout_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
+                    self.distribution_rollout(**rollout_kwargs)
                 last_step = opt_step == num_po_iter - 1
                 if self.training_rollout_horizon <= 0:
                     super().update(opt_step, log=last_step, buffer=self.rollout_buffer)
                 else:
+                    if self.no_epi_train_roll:
+                        ctx_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
                     self._update(last_step, **ctx_kwargs)
                 # Misc process for Std-output
                 t2 = time.time()
@@ -626,7 +669,7 @@ class SVGAgent(SACAgent):
         mc_q_pred = torch.cat([rewards, pred_qs])
         mc_q_pred.sub_(ctx_modules.alpha.detach() * log_pis)
         mc_v_pred = discounts[:1, :].mm(mc_q_pred * masks).t()
-        return -mc_v_pred.mean()
+        return -mc_v_pred
 
     def mb_update_actor(
         self,
@@ -641,6 +684,7 @@ class SVGAgent(SACAgent):
         loss_actor = self._actor_loss(
             ctx_modules, log_pis, batch_sa, rewards, batch_mask, log=log
         )
+        loss_actor = loss_actor.mean()
 
         entropy = -log_pis[0].detach().mean()
         self._info.update(**{KEY_ACTOR_LOSS: loss_actor.detach(), "entropy": entropy})
@@ -682,7 +726,7 @@ class SVGAgent(SACAgent):
             self.critic_target,
             self.critic_optimizer,
             self.alpha,
-            self.model_step_context,
+            self.context_model_step(**kwargs),
             buffer,
             detach,
         )
@@ -691,28 +735,32 @@ class SVGAgent(SACAgent):
         finally:
             pass
 
-    def model_step_context(
-        self, action, model_state, step=0, prediction_strategy=None, **kwargs
-    ):
-        next_obs, reward, done, info = self.dynamics_model.sample(
-            action, model_state, prediction_strategy=prediction_strategy, **kwargs
-        )
-        with torch.no_grad():
-            if self.uara and prediction_strategy == PS_TS1_F:
-                uncertainty = self.dynamics_model.state_entropy
-                if step == 0:
-                    base_uncertainty = torch.quantile(uncertainty, self.zeta_quantile)
-                    if self.kappa is None:
-                        assert self.round_rollout == 1
-                        self.kappa = base_uncertainty
-                    else:
-                        # self.kappa = (
-                        #     base_uncertainty + self.round_rollout * self.kappa
-                        # ) / (self.round_rollout + 1)
-                        # self.round_rollout += 1
-                        self.kappa.lerp_(base_uncertainty, self.lr_kappa)
-                done |= (self.kappa * self.uara_xi < uncertainty)[:, None]
-        return next_obs, reward, done, info
+    def context_model_step(self, prediction_strategy=None):
+        def model_step_context(action, model_state, step=0, **kwargs):
+            next_obs, reward, done, info = self.dynamics_model.sample(
+                action, model_state, prediction_strategy=prediction_strategy, **kwargs
+            )
+            with torch.no_grad():
+                if self.uara and prediction_strategy == PS_TS1_F:
+                    uncertainty = self.dynamics_model.state_entropy
+                    if step == 0:
+                        base_uncertainty = torch.quantile(
+                            uncertainty, self.zeta_quantile
+                        )
+                        if self.kappa is None:
+                            assert self.round_rollout == 1
+                            self.kappa = base_uncertainty
+                        else:
+                            ## This is more faithful reproduction of UARA
+                            # self.kappa = (
+                            #     base_uncertainty + self.round_rollout * self.kappa
+                            # ) / (self.round_rollout + 1)
+                            # self.round_rollout += 1
+                            self.kappa.lerp_(base_uncertainty, self.lr_kappa)
+                    done |= (self.kappa * self.uara_xi < uncertainty)[:, None]
+            return next_obs, reward, done, info
+
+        return model_step_context
 
     def save(self, dir_checkpoint, last=False):
         super().save(dir_checkpoint, last)
