@@ -4,6 +4,7 @@ num_members: 8
 dim_hidden: 256
 layer_norm: 1.0
 drop_rate_base: 1e-2
+activation_fn: SiLU
 noise_wd: 1e-2
 lb_std: 1e-3
 weight_decay_base: 1e-3

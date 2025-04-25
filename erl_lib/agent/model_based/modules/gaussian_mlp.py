@@ -23,6 +23,13 @@ PS_TS1_F = "ts_1_full"
 PS_INF = "ts_infinity"
 PS_NO_EPISTEMIC = "no_epi"
 
+activation_fn_dict = {
+    "SiLU": nn.SiLU,
+    "ReLU": nn.ReLU,
+    "Mish": nn.Mish,
+    "LeakyReLU": nn.LeakyReLU,
+}
+
 
 class GaussianMLP(Model):
     """Wrapper class for 1-D dynamics models."""
@@ -46,6 +53,7 @@ class GaussianMLP(Model):
         lb_std: float = 1e-3,
         layer_norm: float = 1.0,
         drop_rate_base: float = 0.01,
+        activation_fn: str = None,
         weight_decay_base: float = 0.001,
         weight_decay_ratios: Sequence[float] = None,
         # Prediction
@@ -101,6 +109,7 @@ class GaussianMLP(Model):
 
         self.training_loss_fn = training_loss_fn
 
+        activation_fn = activation_fn_dict.get(activation_fn, nn.SiLU)
         depth = len(weight_decay_ratios)
         max_ratio = max(weight_decay_ratios)
         wd_ratio_i = weight_decay_ratios[0]
@@ -114,7 +123,7 @@ class GaussianMLP(Model):
                 weight_decay=wd_0,
                 dropout_rate=dr_0,
                 normalize_eps=0,
-                activation=nn.SiLU(),
+                activation=activation_fn(),
             ),
         ]
 
@@ -128,7 +137,7 @@ class GaussianMLP(Model):
                     dim_hidden,
                     weight_decay=wd_i,
                     dropout_rate=dr_i,
-                    activation=nn.SiLU(),
+                    activation=activation_fn(),
                     normalize_eps=eps_i,
                     residual=residual,
                 )

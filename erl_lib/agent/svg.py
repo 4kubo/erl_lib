@@ -43,11 +43,11 @@ class SVGAgent(SACAgent):
         term_fn,
         dynamics_model,
         model_train,
-        rollout_horizon,
-        training_rollout_horizon,
-        rollout_freq,
-        mve_horizon,
-        use_mve: bool,
+        distribution_rollout_horizon=0,
+        training_rollout_horizon=5,
+        rollout_freq=0,
+        mve_horizon=5,
+        use_mve: bool = True,
         retain_model_buffer_iter: int = 10,
         normalize_input: bool = True,
         normalize_output: bool = True,
@@ -63,7 +63,7 @@ class SVGAgent(SACAgent):
         **kwargs,
     ):
         self.with_dist_rollout = (
-            0 < rollout_horizon
+            0 < distribution_rollout_horizon
             and 0 < rollout_freq
             and not kwargs.get("on_policy_samples", False)
         )
@@ -109,7 +109,7 @@ class SVGAgent(SACAgent):
         )
         self.logger.debug(f"{self.dynamics_model._get_name()} is built")
         # The termination function is assumed to be known
-        self.rollout_horizon = rollout_horizon
+        self.distribution_rollout_horizon = distribution_rollout_horizon
         self.num_rollout_samples = self.batch_size * rollout_freq
         self.rollout_freq = rollout_freq
         # Policy evaluation
@@ -211,10 +211,12 @@ class SVGAgent(SACAgent):
                 self.init_optimizer()
                 # Policy evaluation just after model learning
                 if 0 < self.training_rollout_horizon and 0 < self.num_critic_iter:
-                    rollout_kwargs = {"num_rollout_samples": self.num_critic_samples}
-                    if self.no_epi_dist_roll:
-                        rollout_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
-                    if 0 < self.rollout_horizon:
+                    if 0 < self.distribution_rollout_horizon:
+                        rollout_kwargs = {
+                            "num_rollout_samples": self.num_critic_samples
+                        }
+                        if self.no_epi_dist_roll:
+                            rollout_kwargs["prediction_strategy"] = PS_NO_EPISTEMIC
                         self.distribution_rollout(**rollout_kwargs)
                     critic_iter = trange(
                         self.num_critic_iter,
@@ -294,8 +296,7 @@ class SVGAgent(SACAgent):
                     ctx_modules,
                     obs,
                     action,
-                    self.rollout_horizon,
-                    # prediction_strategy=prediction_strategy,
+                    self.distribution_rollout_horizon,
                 )
                 obss = rollouts[0]
                 masks = rollouts[4]
@@ -357,7 +358,7 @@ class SVGAgent(SACAgent):
                 obs = batch.obs.clone()
                 # When using replay buffer
                 if (
-                    self.rollout_horizon <= 0 or not self.with_dist_rollout
+                    self.distribution_rollout_horizon <= 0 or not self.with_dist_rollout
                 ) and self.normalize_po_input:
                     obs = self.input_normalizer.normalize(obs)
 
@@ -614,7 +615,7 @@ class SVGAgent(SACAgent):
             obs = batch.obs.clone()
             # The case using replay buffer and normalization
             if (
-                self.rollout_horizon <= 0 or not self.with_dist_rollout
+                self.distribution_rollout_horizon <= 0 or not self.with_dist_rollout
             ) and self.normalize_po_input:
                 obs = self.input_normalizer.normalize(obs)
 
@@ -711,7 +712,7 @@ class SVGAgent(SACAgent):
 
     @contextmanager
     def policy_evaluation_context(self, detach=False, **kwargs):
-        if 0 < self.rollout_horizon and self.with_dist_rollout:
+        if 0 < self.distribution_rollout_horizon and self.with_dist_rollout:
             buffer = self.rollout_buffer
         else:
             buffer = self.replay_buffer
@@ -782,7 +783,11 @@ class SVGAgent(SACAgent):
     @property
     def num_critic_samples(self):
         return max(
-            int(self.batch_size * self.num_critic_iter / self.rollout_horizon),
+            int(
+                self.batch_size
+                * self.num_critic_iter
+                / self.distribution_rollout_horizon
+            ),
             self.batch_size,
         )
 
