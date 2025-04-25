@@ -9,15 +9,14 @@ and
 
 ## Sample and runtime efficient implementation
 
-This implementation works on [Gymnaisum](https://gymnasium.farama.org/)
+This implementation works on [Gymnaisum](https://gymnasium.farama.org/) (GYM)
 and [DM control](https://github.com/google-deepmind/dm_control) (DMC)
 even with common hyper-parameters over all tasks,
 with high sample efficiency, short runtime, and small GPU memory usage.
 
-        GYM Humanoid-v4         |GYM Walker2d-v4|DMC cartplole-swingup_sparse|      DMC quadruped_run       |
-
-:------------------------------:|:----:|:----:|:----------------------------:
-![](assets/gym_humananoid.gif) |![](assets/gym_walker.gif) |![](assets/dmc_cartpole_swingup_sparse.gif) | ![](assets/dmc_quadruped_run.gif)
+|        GYM Humanoid-v4         |      GYM Walker2d-v4       |        DMC cartplole-swingup_sparse         |         DMC quadruped_run         |
+|:------------------------------:|:--------------------------:|:-------------------------------------------:|:---------------------------------:|
+| ![](assets/gym_humananoid.gif) | ![](assets/gym_walker.gif) | ![](assets/dmc_cartpole_swingup_sparse.gif) | ![](assets/dmc_quadruped_run.gif) |
 
 ![](assets/runtime_gym.png)
 
@@ -83,4 +82,4 @@ The options are
 python train.py agent=mbpo env=dmc env.task_id=cheetah-run agent.rollout_length=20 agent.num_policy_opt_per_step=10
 ```
 
-###       
+###           
