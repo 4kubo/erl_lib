@@ -1,11 +1,12 @@
 # DHMBPO
 
-Implementation of a sample efficient and fast deep MBRL algorithm, Double Horizon
-Model-based Policy Optimization (DHMBPO)
+Implementation of a sample efficient and fast deep MBRL algorithm, [Double Horizon
+Model-based Policy Optimization (DHMBPO)](https://openreview.net/forum?id=HRvHCd03HM&noteId=HRvHCd03HM)
 DHMBPO conceptually
 combines [MBPO](https://papers.nips.cc/paper_files/paper/2019/hash/5faf461eff3099671ad63c6f3f094f7f-Abstract.html)
 and
 [SAC-SVG(H)](https://proceedings.mlr.press/v144/amos21a.html).
+The implementation if designed to use a gpu.
 
 ## Sample and runtime efficient implementation
 
@@ -14,15 +15,18 @@ and [DM control](https://github.com/google-deepmind/dm_control) (DMC)
 even with common hyper-parameters over all tasks,
 with high sample efficiency, short runtime, and small GPU memory usage.
 
+- Visualization of each agents' optimized behavior at the final environment stsp (500K steps)
+
 |        GYM Humanoid-v4         |      GYM Walker2d-v4       |        DMC cartplole-swingup_sparse         |         DMC quadruped_run         |
 |:------------------------------:|:--------------------------:|:-------------------------------------------:|:---------------------------------:|
 | ![](assets/gym_humananoid.gif) | ![](assets/gym_walker.gif) | ![](assets/dmc_cartpole_swingup_sparse.gif) | ![](assets/dmc_quadruped_run.gif) |
 
-![](assets/runtime_gym.png)
+- Test return as a function of elapsed time (Figure 2(b) in the paper).
+  ![](assets/runtime_gym.png)
 
 ## Setup execution environment
 
-At first, install suitable version of pytorch<2, then
+At first, install suitable version of pytorch<2 from [here](https://pytorch.org/get-started/previous-versions/), then
 
 ```shell
 pip install -e .
@@ -32,7 +36,8 @@ pip install -e .
 
 ### Suites and tasks
 
-for the [Gymnaisum](https://gymnasium.farama.org/) tasks, set `env=gym`
+for the [Gymnaisum](https://gymnasium.farama.org/) (formerly Open AI's [gym](https://github.com/openai/gym)) tasks, set
+`env=gym`
 and `env.task_id` to one of "MBHumanoid-v0", "
 MBAnt-v0", "MBHopper-v0", "MBHalfCheetah-v0" and "MBWalker2d-v0".
 These are identical with "Humanoid-v4", "
@@ -46,7 +51,7 @@ and `myosuite` for [MyoSuite](https://github.com/MyoHub/myosuite).
 
 ## How to reproduce results in the paper
 
-In the following, we use ``cheetah-run`` in the DMC suite.
+In the following, we use ``quadruped-run`` in the DMC suite.
 
 ### Main result: DHMBPO in Figure 2(a) for GYM or Figure 3 for DMC
 
@@ -56,7 +61,7 @@ e.g., `env.task_id=MBHalfCheetah-v0`
 as described in the subsection "Suites and tasks".
 
 ```shell 
-python train.py agent=dhmbpo env=dmc env.task_id=cheetah-run
+python train.py agent=dhmbpo env=dmc env.task_id=quadruped-run
 ```
 
 ### DHMBPO w/o DR in Figure 4
@@ -66,7 +71,7 @@ By adding `agent.training_rollout_length=5`, it runs SAC-SVG(H) of which model r
 length=5.
 
 ```shell 
-python train.py agent=svg env=dmc env.task_id=cheetah-run agent.training_rollout_length
+python train.py agent=svg env=dmc env.task_id=quadruped-run agent.training_rollout_length=5
 ```
 
 ### DHMBPO w/o TR in Figure 4
@@ -82,4 +87,20 @@ The options are
 python train.py agent=mbpo env=dmc env.task_id=cheetah-run agent.rollout_length=20 agent.num_policy_opt_per_step=10
 ```
 
-###           
+### CSV files
+
+We provide [csv files](./results) used for plots in the paper, including other baseline methods.
+
+## Cite
+
+```
+@article{
+  kubo2025double,
+  title={Double Horizon Model-Based Policy Optimization},
+  author={Akihiro Kubo and Paavo Parmas and Shin Ishii},
+  journal={Transactions on Machine Learning Research},
+  issn={2835-8856},
+  year={2025},
+  url={https://openreview.net/forum?id=HRvHCd03HM},
+}
+```
