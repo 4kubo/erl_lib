@@ -1,0 +1,8 @@
+defaults:
+  - /agent/svg@_here_
+
+distribution_rollout_horizon: 20
+rollout_freq: 20
+retain_model_buffer_iter: 10
+on_policy_samples: False
+no_epi_dist_roll: False
